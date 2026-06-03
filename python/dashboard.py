@@ -375,6 +375,78 @@ def api_agents(handler):
     ))
     _json_response(handler, result)
 
+
+def api_merge_queue(handler):
+    """GET /api/merge-queue — list merge queue entries."""
+    try:
+        db_path = os.path.join(str(_ws), "overdrop.db")
+        import sqlite3
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        # Auto-create table if missing
+        conn.execute("""CREATE TABLE IF NOT EXISTS merge_queue (
+            task_id TEXT PRIMARY KEY, branch TEXT NOT NULL, worktree TEXT NOT NULL,
+            agent_id TEXT NOT NULL, priority INTEGER DEFAULT 5, status TEXT DEFAULT 'pending',
+            conflict_level INTEGER DEFAULT 0, error_log TEXT,
+            created_at TEXT DEFAULT (datetime('now')), merged_at TEXT
+        )""")
+        conn.commit()
+        rows = conn.execute(
+            "SELECT * FROM merge_queue WHERE status IN ('pending', 'dry_run', 'resolving') ORDER BY priority DESC, created_at ASC"
+        ).fetchall()
+        conn.close()
+        result = [dict(r) for r in rows]
+        _json_response(handler, result)
+    except Exception as e:
+        _json_response(handler, {"error": str(e)}, 500)
+
+
+def api_trigger_merge(handler, task_id):
+    """POST /api/merge-queue/:id/trigger — enqueue task for merge."""
+    try:
+        db_path = os.path.join(str(_ws), "overdrop.db")
+        import sqlite3
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        
+        # Check if already in queue
+        existing = conn.execute("SELECT * FROM merge_queue WHERE task_id=?", (task_id,)).fetchone()
+        if existing:
+            conn.close()
+            _json_response(handler, {"error": "Already in queue", "status": existing["status"]}, 409)
+            return
+        
+        # Get task info from filesystem
+        fs = get_fs()
+        task = None
+        for status in ["active", "done", "inbox"]:
+            for t in fs.list_tasks(status):
+                if t.id == task_id:
+                    task = t
+                    break
+            if task:
+                break
+        
+        if not task:
+            conn.close()
+            _json_response(handler, {"error": "Task not found"}, 404)
+            return
+        
+        branch = f"od/{task.assignee or 'unknown'}/{task_id[:8]}"
+        worktree_path = f"/tmp/overdrop-worktrees/od-{task_id[:8]}-{task.assignee or 'unknown'}"
+        
+        conn.execute(
+            "INSERT OR REPLACE INTO merge_queue (task_id, branch, worktree, agent_id, priority, status) VALUES (?, ?, ?, ?, ?, 'pending')",
+            (task_id, branch, worktree_path, task.assignee or "unknown", task.priority)
+        )
+        conn.commit()
+        conn.close()
+        
+        _json_response(handler, {"ok": True, "task_id": task_id})
+    except Exception as e:
+        _json_response(handler, {"error": str(e)}, 500)
+
+
 # ---- HTTP HANDLER ----
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -409,6 +481,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             api_agents(self)
         elif p == "/api/models":
             api_models(self)
+        elif p == "/api/merge-queue":
+            api_merge_queue(self)
+        elif p.startswith("/api/merge-queue/") and p.endswith("/trigger"):
+            task_id = p.split("/")[3]
+            api_trigger_merge(self, task_id)
         else:
             self.send_error(404)
 

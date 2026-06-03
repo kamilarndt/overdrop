@@ -119,6 +119,13 @@ tr[data-task]{cursor:pointer}
     <div class="sc dn"><div class="lbl">✅ Done</div><div class="val" id="sd">-</div><div class="sub">Completed</div></div>
     <div class="sc fl"><div class="lbl">❌ Failed</div><div class="val" id="sf">-</div><div class="sub">Need review</div></div>
     <div class="sc at"><div class="lbl">⚠️ Blocked</div><div class="val" id="sbn">-</div><div class="sub">Waiting</div></div>
+    <div class="sc" style="border-left:3px solid var(--blu)"><div class="lbl">🔀 Merge Queue</div><div class="val" id="smq">-</div><div class="sub">Pending merges</div></div>
+  </div>
+
+  <!-- MERGE QUEUE -->
+  <div class="sec" id="merge-queue-section" style="display:none">
+    <h3>🔀 Merge Queue</h3>
+    <div id="merge-queue-list" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:8px"></div>
   </div>
 
   <!-- AGENTS -->
@@ -159,7 +166,7 @@ tr[data-task]{cursor:pointer}
       <button class="btn btn-secondary btn-sm" onclick="resetFilters()">Clear</button>
     </div>
     <div class="tw"><table><thead><tr>
-      <th>ID</th><th>Title</th><th>Status</th><th>From</th><th>To</th><th>Pri</th><th>Actions</th>
+      <th>ID</th><th>Title</th><th>Status</th><th>From</th><th>To</th><th>Pri</th><th>Merge</th><th>Actions</th>
     </tr></thead><tbody id="tt"></tbody></table></div>
   </div>
 
@@ -182,6 +189,10 @@ tr[data-task]{cursor:pointer}
     <div class="field"><label>Created</label><div class="val" id="md-created"></div></div>
     <div class="field"><label>Context</label><div class="val" id="md-context"></div></div>
     <div class="field"><label>Result</label><div class="val" id="md-result"></div></div>
+    <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--b)">
+      <div style="font-size:11px;color:var(--m);margin-bottom:8px;text-transform:uppercase">🔀 Worktree & Merge</div>
+      <div id="md-worktree"></div>
+    </div>
     <div class="modal-actions" id="md-actions"></div>
   </div>
 </div>
@@ -301,6 +312,42 @@ fetchModels();
 fetchAgents();
 setInterval(fetchAgents, 5000);
 
+// Merge Queue
+let mergeQueue = [];
+
+async function fetchMergeQueue() {
+  try {
+    const res = await fetch('/api/merge-queue');
+    mergeQueue = await res.json();
+    document.getElementById('smq').textContent = mergeQueue.length;
+    document.getElementById('merge-queue-section').style.display = mergeQueue.length ? '' : 'none';
+    renderMergeQueue();
+  } catch(e) {}
+}
+
+function renderMergeQueue() {
+  const el = document.getElementById('merge-queue-list');
+  if (!mergeQueue.length) { el.innerHTML = ''; return; }
+  el.innerHTML = mergeQueue.map(m => {
+    const statusColors = { pending: 'var(--y)', dry_run: 'var(--blu)', resolving: 'var(--y)' };
+    const statusIcons = { pending: '⏳', dry_run: '🔍', resolving: '🧠' };
+    const color = statusColors[m.status] || 'var(--m)';
+    const icon = statusIcons[m.status] || '❓';
+    return `<div class="ai" style="border-left:3px solid ${color};flex-direction:column;gap:4px">
+      <div style="display:flex;align-items:center;gap:6px">
+        <span style="color:${color};font-size:12px">${icon}</span>
+        <span style="font-family:var(--mon);font-size:11px;color:var(--t)">${(m.task_id||'').slice(0,8)}</span>
+        <span style="font-size:10px;color:var(--m);margin-left:auto">${m.status}</span>
+      </div>
+      <div style="font-size:9px;color:var(--m)">Agent: ${m.agent_id} | Branch: ${(m.branch||'').slice(0,30)}</div>
+      <div style="font-size:9px;color:var(--m)">Priority: P${m.priority} | Conflict: ${m.conflict_level||0}</div>
+    </div>`;
+  }).join('');
+}
+
+fetchMergeQueue();
+setInterval(fetchMergeQueue, 5000);
+
 // Stats
 s.addEventListener('stats', e => {
   const d = JSON.parse(e.data);
@@ -322,16 +369,29 @@ s.addEventListener('tasks', e => {
 function renderTasks(tasks) {
   const tbody = document.getElementById('tt');
   if (!tasks.length) {
-    tbody.innerHTML = '<tr><td colspan="7" class="em"><div class="ic">📭</div><p>No tasks</p></td></tr>';
+    tbody.innerHTML = '<tr><td colspan="8" class="em"><div class="ic">📭</div><p>No tasks</p></td></tr>';
     return;
   }
   tbody.innerHTML = tasks.map(t => {
     const bdg = { inbox: 'in', active: 'ac', claimed: 'cl', done: 'dn', failed: 'fl', blocked: 'bl', feedback: 'fb' }[t.status] || 'in';
     const actions = getActions(t);
+    // Merge status
+    const mqEntry = mergeQueue.find(m => m.task_id === (t.full_id || t.id));
+    let mergeBadge = '';
+    if (mqEntry) {
+      const mColors = { pending: 'var(--y)', dry_run: 'var(--blu)', resolving: 'var(--y)', merged: 'var(--g)', conflict: 'var(--r)' };
+      const mColor = mColors[mqEntry.status] || 'var(--m)';
+      mergeBadge = `<span style="background:${mColor};color:#fff;padding:2px 6px;border-radius:4px;font-size:9px">${mqEntry.status}</span>`;
+    } else if (t.status === 'done') {
+      mergeBadge = `<button class="btn btn-secondary btn-sm" onclick="triggerMerge('${t.full_id || t.id}')" style="font-size:9px;padding:2px 6px">🔀 Merge</button>`;
+    } else {
+      mergeBadge = '<span style="color:var(--m);font-size:9px">—</span>';
+    }
     return `<tr data-task="${t.full_id || t.id}" onclick="showTaskDetail('${t.full_id || t.id}')">
       <td>${t.id}</td><td>${t.title}</td>
       <td><span class="bdg ${bdg}">${t.status}</span></td>
       <td>${t.from}</td><td>${t.assignee}</td><td>P${t.priority || 5}</td>
+      <td>${mergeBadge}</td>
       <td><div class="actions" onclick="event.stopPropagation()">${actions}</div></td></tr>`;
   }).join('');
 }
@@ -430,6 +490,12 @@ async function deleteTask(id) {
   await api('DELETE', `/api/tasks/${id}`);
 }
 
+async function triggerMerge(id) {
+  const r = await api('POST', `/api/merge-queue/${id}/trigger`);
+  if (r.error) alert(r.error);
+  else { fetchMergeQueue(); renderTasks(allTasks); }
+}
+
 // === TASK DETAIL MODAL ===
 async function showTaskDetail(id) {
   const data = await api('GET', `/api/tasks/${id}`);
@@ -446,9 +512,28 @@ async function showTaskDetail(id) {
   document.getElementById('md-context').textContent = JSON.stringify(data.context, null, 2) || '{}';
   document.getElementById('md-result').textContent = JSON.stringify(data.result, null, 2) || '{}';
 
+  // Worktree & Merge info
+  const mqEntry = mergeQueue.find(m => m.task_id === id);
+  const wtInfo = document.getElementById('md-worktree');
+  if (mqEntry) {
+    wtInfo.innerHTML = `
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+        <div class="field"><label>Branch</label><div class="val">${mqEntry.branch || '—'}</div></div>
+        <div class="field"><label>Status</label><div class="val"><span class="bdg ${mqEntry.status.slice(0,2)}">${mqEntry.status}</span></div></div>
+        <div class="field"><label>Worktree</label><div class="val" style="font-size:10px">${mqEntry.worktree || '—'}</div></div>
+        <div class="field"><label>Conflict Level</label><div class="val">${mqEntry.conflict_level || 0} / 3</div></div>
+      </div>`;
+  } else {
+    wtInfo.innerHTML = '<div style="color:var(--m);font-size:11px">Not in merge queue</div>';
+  }
+
   // Dynamic actions
   const acts = document.getElementById('md-actions');
-  acts.innerHTML = getActions(data).replace(/onclick="([^"]*)"/g, 'onclick="$1;closeModal()"');
+  let actionsHtml = getActions(data);
+  if (data.status === 'done' && !mqEntry) {
+    actionsHtml += `<button class="btn btn-primary btn-sm" onclick="triggerMerge('${data.id || data.full_id}');closeModal()">🔀 Trigger Merge</button>`;
+  }
+  acts.innerHTML = actionsHtml.replace(/onclick="([^"]*)"/g, 'onclick="$1;closeModal()"');
   acts.innerHTML += '<button class="btn btn-secondary" onclick="closeModal()">Close</button>';
 
   document.getElementById('modal').classList.add('active');
