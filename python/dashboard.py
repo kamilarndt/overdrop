@@ -34,6 +34,20 @@ sse = SSEManager()
 HTML = open(os.path.join(os.path.dirname(__file__), "..", "dashboard.html")).read()
 
 _ws = None; _fs = None; _bus = None
+_html_cache = None
+
+def get_html():
+    """Load HTML from modular dashboard/ or fallback to monolith."""
+    global _html_cache
+    if _html_cache:
+        return _html_cache
+    # Try modular dashboard first
+    modular = os.path.join(os.path.dirname(__file__), "..", "dashboard", "index.html")
+    if os.path.exists(modular):
+        _html_cache = open(modular).read()
+    else:
+        _html_cache = open(os.path.join(os.path.dirname(__file__), "..", "dashboard.html")).read()
+    return _html_cache
 
 def get_fs():
     global _fs
@@ -466,6 +480,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         if p in ("", "/"):
             self._html()
+        elif p.startswith("/css/") or p.startswith("/js/"):
+            self._static(p)
         elif p == "/events":
             self._sse()
         elif p == "/api/tasks":
@@ -530,7 +546,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.end_headers()
-        self.wfile.write(HTML.encode())
+        self.wfile.write(get_html().encode())
+
+    def _static(self, path):
+        """Serve static files from dashboard/ directory."""
+        file_path = os.path.join(os.path.dirname(__file__), "..", "dashboard", path.lstrip("/"))
+        if not os.path.exists(file_path):
+            self.send_error(404)
+            return
+        content_type = "text/css" if path.endswith(".css") else "application/javascript"
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.end_headers()
+        self.wfile.write(open(file_path, "rb").read())
 
     def _sse(self):
         self.send_response(200)

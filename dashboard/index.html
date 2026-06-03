@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OverDrop Dashboard</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div class="hd">
+  <div class="hd-l">
+    <div class="logo">⬡ Over<span>Drop</span></div>
+    <div class="ver">v3 — modular</div>
+  </div>
+  <div class="hd-r">
+    <div class="con"><div class="dot rd" id="wd"></div><span id="wt">Connecting</span></div>
+    <div class="run">Cycle: <strong id="ri">—</strong></div>
+  </div>
+</div>
+<div class="ct">
+  <!-- STATS -->
+  <div class="stats">
+    <div class="sc in"><div class="lbl">📥 Inbox</div><div class="val" id="si">-</div><div class="sub">Pending</div></div>
+    <div class="sc ac"><div class="lbl">🔧 Active</div><div class="val" id="sa">-</div><div class="sub">In progress</div></div>
+    <div class="sc dn"><div class="lbl">✅ Done</div><div class="val" id="sd">-</div><div class="sub">Completed</div></div>
+    <div class="sc fl"><div class="lbl">❌ Failed</div><div class="val" id="sf">-</div><div class="sub">Need review</div></div>
+    <div class="sc at"><div class="lbl">⚠️ Blocked</div><div class="val" id="sbn">-</div><div class="sub">Waiting</div></div>
+    <div class="sc" style="border-left:3px solid var(--blu)"><div class="lbl">🔀 Merge Queue</div><div class="val" id="smq">-</div><div class="sub">Pending merges</div></div>
+  </div>
+
+  <!-- MERGE QUEUE -->
+  <div class="sec" id="merge-queue-section" style="display:none">
+    <h3>🔀 Merge Queue</h3>
+    <div id="merge-queue-list" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:8px"></div>
+  </div>
+
+  <!-- AGENTS -->
+  <div class="ag"><h3>🔌 Agents — <span id="ac">0</span> live</h3>
+    <div id="agent-list" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:8px"></div>
+  </div>
+
+  <!-- CREATE TASK FORM -->
+  <div class="sec">
+    <h3>➕ Create Task</h3>
+    <div class="form-row">
+      <input type="text" id="new-title" placeholder="Task title...">
+      <select id="new-assignee"><option value="">Unassigned</option></select>
+      <select id="new-priority">
+        <option value="1">P1 (critical)</option><option value="3">P3 (high)</option>
+        <option value="5" selected>P5 (normal)</option><option value="7">P7 (low)</option>
+        <option value="10">P10 (backlog)</option>
+      </select>
+      <button class="btn btn-primary" onclick="createTask()">+ Submit</button>
+    </div>
+  </div>
+
+  <!-- FILTER BAR + TASKS -->
+  <div class="sec">
+    <h3>📋 Tasks</h3>
+    <div class="filter-bar">
+      <span class="filter-label">Filter:</span>
+      <select id="f-status" onchange="applyFilters()">
+        <option value="">All statuses</option>
+        <option value="inbox">📥 Inbox</option>
+        <option value="active">🔧 Active</option>
+        <option value="done">✅ Done</option>
+        <option value="failed">❌ Failed</option>
+        <option value="blocked">🚫 Blocked</option>
+      </select>
+      <select id="f-agent" onchange="applyFilters()"><option value="">All agents</option></select>
+      <input type="text" id="f-search" placeholder="Search title..." oninput="applyFilters()">
+      <button class="btn btn-secondary btn-sm" onclick="resetFilters()">Clear</button>
+    </div>
+    <div class="tw"><table><thead><tr>
+      <th>ID</th><th>Title</th><th>Status</th><th>From</th><th>To</th><th>Pri</th><th>Merge</th><th>Actions</th>
+    </tr></thead><tbody id="tt"></tbody></table></div>
+  </div>
+
+  <!-- ACTIVITY LOG -->
+  <div class="sec"><h3>📨 Activity <span style="font-size:10px;color:var(--m);font-weight:400">live</span></h3>
+    <div class="tw" id="log"></div></div>
+</div>
+
+<!-- TASK DETAIL MODAL -->
+<div class="modal-overlay" id="modal" onclick="if(event.target===this)closeModal()">
+  <div class="modal">
+    <h2 id="modal-title">Task Details</h2>
+    <div class="field"><label>ID</label><div class="val" id="md-id"></div></div>
+    <div class="field"><label>Title</label><div class="val" id="md-title"></div></div>
+    <div class="field"><label>Status</label><div class="val" id="md-status"></div></div>
+    <div class="field"><label>Assignee</label><div class="val" id="md-assignee"></div></div>
+    <div class="field"><label>Priority</label><div class="val" id="md-priority"></div></div>
+    <div class="field"><label>From</label><div class="val" id="md-from"></div></div>
+    <div class="field"><label>Retries</label><div class="val" id="md-retries"></div></div>
+    <div class="field"><label>Created</label><div class="val" id="md-created"></div></div>
+    <div class="field"><label>Context</label><div class="val" id="md-context"></div></div>
+    <div class="field"><label>Result</label><div class="val" id="md-result"></div></div>
+    <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--b)">
+      <div style="font-size:11px;color:var(--m);margin-bottom:8px;text-transform:uppercase">🔀 Worktree & Merge</div>
+      <div id="md-worktree"></div>
+    </div>
+    <div class="modal-actions" id="md-actions"></div>
+  </div>
+</div>
+
+<!-- JS MODULES -->
+<script src="js/state.js"></script>
+<script src="js/api.js"></script>
+<script src="js/render.js"></script>
+<script src="js/actions.js"></script>
+<script src="js/modal.js"></script>
+<script src="js/filters.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
