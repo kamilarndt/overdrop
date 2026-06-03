@@ -11,11 +11,12 @@ Folders:
   failed/    - failed tasks (max_retries exhausted)
   blocked/   - tasks waiting on external dependencies
   feedback/  - tasks needing human/decision input
-  
+
 All operations are based on atomic os.rename() for POSIX safety.
 """
 
 import json
+import logging
 import os
 import uuid
 import time
@@ -23,6 +24,8 @@ import glob
 from datetime import datetime, timezone
 from typing import Optional, Callable
 from .types import Task, TaskStatus
+
+logger = logging.getLogger("overdrop.fsprotocol")
 
 
 def _now() -> str:
@@ -35,24 +38,26 @@ def _uuid() -> str:
 
 class FsProtocol:
     """Filesystem-based task state machine.
-    
+
     Every task is a JSON file that moves through folders:
     inbox -> active -> done | failed | blocked | feedback
-    
+
     os.rename() is atomic on POSIX = natural locking.
     """
-    
-    def __init__(self, workspace_dir: str):
+
+    def __init__(self, workspace_dir: str, merge_queue=None, worktree_manager=None):
         self.root = os.path.abspath(workspace_dir)
+        self._mq = merge_queue  # Optional MergeQueue
+        self._wt = worktree_manager  # Optional WorktreeManager
         self._ensure_dirs()
-    
+
     def _ensure_dirs(self):
         """Create workspace directory structure."""
         for folder in ["inbox", "active", "done", "failed", "blocked", "feedback"]:
             os.makedirs(os.path.join(self.root, folder), exist_ok=True)
-    
+
     # ---- WRITE OPERATIONS ----
-    
+
     def submit(self, title: str, from_agent: str, assign: str = None,
                context: dict = None, priority: int = 5,
                max_retries: int = 3) -> str:
@@ -71,10 +76,15 @@ class FsProtocol:
         )
         self._write_task("inbox", task)
         return task_id
-    
-    def claim(self, agent: str, task_id: str) -> Optional[Task]:
+
+    def claim(self, agent: str, task_id: str, use_worktree: bool = False) -> Optional[Task]:
         """Claim a task from inbox. Atomic os.rename() — first wins.
-        
+
+        Args:
+            agent: Agent name claiming the task
+            task_id: Task to claim
+            use_worktree: If True, auto-create git worktree
+
         Returns the Task if claimed, None if someone else got it first.
         """
         src = self._path("inbox", task_id)
@@ -83,32 +93,72 @@ class FsProtocol:
             os.rename(src, dst)
         except FileNotFoundError:
             return None  # someone else claimed it
-        
+
         task = self._read_task(dst)
         task.assignee = agent
         task.status = TaskStatus.CLAIMED
+
+        # Auto-create worktree if requested
+        if use_worktree and self._wt:
+            try:
+                worktree_path = self._wt.create(task_id, agent)
+                task.worktree = worktree_path
+                logger.info(f"Worktree created for task {task_id[:8]}: {worktree_path}")
+            except Exception as e:
+                logger.error(f"Failed to create worktree: {e}")
+
         self._write_task("active", task)
         return task
-    
-    def complete(self, task_id: str, result: dict = None):
-        """Mark a task as done."""
+
+    def complete(self, task_id: str, result: dict = None,
+                 auto_merge: bool = False):
+        """Mark a task as done.
+
+        Args:
+            task_id: Task to complete
+            result: Result data
+            auto_merge: If True, auto-enqueue to MergeQueue
+        """
         task = self._move_task("active", "done", task_id)
         if task:
             task.status = TaskStatus.DONE
             task.result = result or {}
+
+            # Auto-enqueue to MergeQueue if requested
+            if auto_merge and self._mq and task.worktree:
+                try:
+                    branch = f"od/{task.assignee or 'unknown'}/{task_id[:8]}"
+                    self._mq.enqueue(
+                        task_id=task_id,
+                        branch=branch,
+                        worktree_path=task.worktree,
+                        agent_id=task.assignee or "unknown",
+                        priority=task.priority,
+                    )
+                    logger.info(f"Task {task_id[:8]} enqueued to MergeQueue")
+                except Exception as e:
+                    logger.error(f"Failed to enqueue to MergeQueue: {e}")
+
             self._write_task("done", task)
-    
+
+    def submit_merge_ready(self, task_id: str, result: dict = None):
+        """Complete task and auto-enqueue to MergeQueue.
+
+        Convenience method for: complete() + auto_merge=True
+        """
+        self.complete(task_id, result=result, auto_merge=True)
+
     def fail(self, task_id: str, error: str = None):
         """Mark a task as failed. Retry if max_retries not exhausted."""
         task = self._read_task(self._path("active", task_id))
         if not task:
             return
-        
+
         task.retry_count += 1
         task.result = {**task.result, "error": error}
-        
+
         if task.retry_count < task.max_retries:
-            # Move back to inbox for retry — reset assignee so another agent can claim
+            # Move back to inbox for retry — reset assignee
             task.assignee = None
             self._move_task("active", "inbox", task_id)
             task.status = TaskStatus.INBOX
@@ -117,7 +167,7 @@ class FsProtocol:
             self._move_task("active", "failed", task_id)
             task.status = TaskStatus.FAILED
             self._write_task("failed", task)
-    
+
     def block(self, task_id: str, reason: str = None):
         """Block a task waiting on external dependency."""
         task = self._move_task("active", "blocked", task_id)
@@ -125,7 +175,7 @@ class FsProtocol:
             task.status = TaskStatus.BLOCKED
             task.result["blocked_reason"] = reason
             self._write_task("blocked", task)
-    
+
     def unblock(self, task_id: str):
         """Move a blocked task back to inbox for retry."""
         self._move_task("blocked", "inbox", task_id)
@@ -133,7 +183,7 @@ class FsProtocol:
         if task:
             task.status = TaskStatus.INBOX
             self._write_task("inbox", task)
-    
+
     def request_feedback(self, task_id: str, question: str = None,
                          options: list = None):
         """Request human/decision feedback. Task goes to feedback/."""
@@ -143,7 +193,7 @@ class FsProtocol:
             task.result["question"] = question
             task.result["options"] = options or []
             self._write_task("feedback", task)
-    
+
     def provide_feedback(self, task_id: str, decision: str):
         """Provide feedback — move task back to active."""
         self._move_task("feedback", "active", task_id)
@@ -152,9 +202,9 @@ class FsProtocol:
             task.result["decision"] = decision
             task.status = TaskStatus.ACTIVE
             self._write_task("active", task)
-    
+
     # ---- READ OPERATIONS ----
-    
+
     def list_tasks(self, folder: str, limit: int = 100) -> list[Task]:
         """List tasks in a specific folder, newest first."""
         pattern = os.path.join(self.root, folder, "*.json")
@@ -165,7 +215,7 @@ class FsProtocol:
             if t:
                 tasks.append(t)
         return tasks
-    
+
     def get_task(self, task_id: str) -> Optional[Task]:
         """Find a task by ID across all folders."""
         for folder in ["inbox", "active", "done", "failed", "blocked", "feedback"]:
@@ -173,12 +223,13 @@ class FsProtocol:
             if task:
                 return task
         return None
-    
+
     def reap_stale(self, timeout_s: int = 300) -> list[str]:
         """Move stuck active tasks back to inbox.
-        
+
         If an agent crashes mid-task, the file stays in active/.
         This reaper moves it back to inbox after timeout.
+        Also cleans up orphaned worktrees.
         """
         reaped = []
         now = time.time()
@@ -190,13 +241,23 @@ class FsProtocol:
                     reaped.append(task_id)
                 except FileNotFoundError:
                     pass
+
+        # Also cleanup stale worktrees
+        if self._wt:
+            try:
+                stale = self._wt.cleanup_stale_worktrees(timeout_s)
+                if stale:
+                    logger.info(f"Cleaned {len(stale)} stale worktrees")
+            except Exception as e:
+                logger.error(f"Worktree cleanup failed: {e}")
+
         return reaped
-    
+
     # ---- INTERNAL ----
-    
+
     def _path(self, folder: str, task_id: str) -> str:
         return os.path.join(self.root, folder, f"{task_id}.json")
-    
+
     def _write_task(self, folder: str, task: Task):
         path = self._path(folder, task.id)
         data = {
@@ -221,7 +282,7 @@ class FsProtocol:
         with open(tmp, "w") as f:
             json.dump(data, f, indent=2, default=str)
         os.replace(tmp, path)
-    
+
     def _read_task(self, path: str) -> Optional[Task]:
         try:
             with open(path) as f:
@@ -245,7 +306,7 @@ class FsProtocol:
             )
         except (FileNotFoundError, json.JSONDecodeError):
             return None
-    
+
     def _move_task(self, src_folder: str, dst_folder: str,
                    task_id: str) -> Optional[Task]:
         """Move a task file between folders atomically."""

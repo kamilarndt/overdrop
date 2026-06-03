@@ -14,7 +14,9 @@ Stan zadań = FsProtocol (system plików).
 """
 
 import json
+import os
 import sqlite3
+import struct
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
@@ -22,9 +24,34 @@ from .types import Message, MessageType
 
 
 def _uuid7() -> str:
-    """UUID v7 (time-ordered) idealny dla SQLite clustered PK."""
-    # Prosty UUID4 na start — można zastąpić v7
-    return str(uuid.uuid4())
+    """UUID v7 (time-ordered) — idealny dla SQLite clustered PK.
+
+    Format:
+    - 48 bits: Unix timestamp in milliseconds
+    - 4 bits: version (0111 = 7)
+    - 62 bits: random data (with variant bits)
+
+    Monotonically increasing = perfect for B-tree indexes.
+    """
+    # Current time in milliseconds
+    ts_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+
+    # 48-bit timestamp
+    ts_bytes = struct.pack(">Q", ts_ms)[2:]  # 6 bytes
+
+    # Version bits (0111) + 12 random bits
+    rand1 = os.urandom(2)
+    rand1_byte = bytes([0x70 | (rand1[0] & 0x0F)])  # version 7
+
+    # Variant bits (10xx) + 6 random bytes
+    rand2 = os.urandom(8)
+    rand2_byte = bytes([0x80 | (rand2[0] & 0x3F)])  # variant 1
+
+    # Combine: 6 bytes timestamp + 1 byte version + 2 bytes random + 1 byte variant + 7 bytes random
+    uuid_bytes = ts_bytes + rand1_byte + rand1[1:2] + rand2_byte + rand2[1:8]
+
+    # Format as UUID string
+    return str(uuid.UUID(bytes=uuid_bytes))
 
 
 class MailBus:

@@ -1,4 +1,15 @@
-"""OverDrop — Integration Tests for MergeQueue + Worktree"""
+"""OverDrop — Integration Tests for MergeQueue + Worktree
+
+Covers:
+- Merge success (no conflicts)
+- Merge conflict (Tier 1 — rebase)
+- Retry after failed merge
+- Worktree cleanup after operations
+- Priority ordering
+- Cancel merge
+- List all entries
+- FsProtocol integration (auto_merge, use_worktree)
+"""
 
 import sys
 import os
@@ -9,16 +20,18 @@ import uuid
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "python"))
-from overdrop import WorktreeManager, MergeQueue
+from overdrop import WorktreeManager, MergeQueue, FsProtocol
 
 
 def setup_git(path):
     """Create a minimal git repo for testing."""
     os.makedirs(path, exist_ok=True)
-    os.makedirs(os.path.join(path, ".overdrop"), exist_ok=True)  # For MailBus
+    os.makedirs(os.path.join(path, ".overdrop"), exist_ok=True)
     subprocess.run(["git", "init"], cwd=path, capture_output=True)
-    subprocess.run(["git", "config", "user.email", "test@overdrop.dev"], cwd=path, capture_output=True)
-    subprocess.run(["git", "config", "user.name", "Test"], cwd=path, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@overdrop.dev"],
+                   cwd=path, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test"],
+                   cwd=path, capture_output=True)
     with open(os.path.join(path, "main.py"), "w") as f:
         f.write("def main(): return 'initial'\n")
     subprocess.run(["git", "add", "."], cwd=path, capture_output=True)
@@ -65,13 +78,12 @@ def test_merge_success_no_conflicts():
     r2 = mq.process_next()
     assert r2.status == "merged", f"Second merge failed: {r2.error}"
 
-    # Cleanup
     mq.close()
     shutil.rmtree(tmp)
 
 
 # =========================================================================
-# B. MERGE CONFLICT (Tier 1 — simple)
+# B. MERGE CONFLICT (Tier 1 — rebase)
 # =========================================================================
 
 def test_merge_conflict_tier1():
@@ -107,9 +119,8 @@ def test_merge_conflict_tier1():
     mq.enqueue(t2, b2, wt2, "agent-b")
     r2 = mq.process_next()
     assert r2.status == "conflict", f"Expected conflict, got {r2.status}"
-    assert r2.conflict_level >= 1, f"Expected conflict_level >= 1, got {r2.conflict_level}"
+    assert r2.conflict_level >= 1, f"Expected conflict_level >= 1"
 
-    # Cleanup
     mq.close()
     shutil.rmtree(tmp)
 
@@ -145,7 +156,6 @@ def test_worktree_cleanup_after_merge():
     # Verify worktree is cleaned up
     assert not os.path.exists(wt1), "Worktree should be cleaned up after merge"
 
-    # Cleanup
     mq.close()
     shutil.rmtree(tmp)
 
@@ -158,7 +168,9 @@ def test_retry_after_conflict():
     """Retry a conflicted merge should reset status to pending."""
     tmp = tempfile.mkdtemp(prefix="od-test-retry-")
     repo = setup_git(os.path.join(tmp, "repo"))
-    wt = WorktreeManager(repo)
+    # Use unique worktree root to avoid conflicts
+    wt_root = os.path.join(tmp, "worktrees")
+    wt = WorktreeManager(repo, worktree_root=wt_root)
     mq = MergeQueue(repo)
 
     t1 = f"task-{uuid.uuid4().hex[:8]}"
@@ -194,9 +206,8 @@ def test_retry_after_conflict():
 
     # Verify status reset
     status = mq.get_status(t2)
-    assert status["status"] == "pending", f"Expected pending after retry, got {status['status']}"
+    assert status["status"] == "pending", f"Expected pending, got {status['status']}"
 
-    # Cleanup
     mq.close()
     shutil.rmtree(tmp)
 
@@ -230,7 +241,6 @@ def test_cancel_merge():
     status = mq.get_status(t1)
     assert status["status"] == "cancelled", f"Expected cancelled, got {status['status']}"
 
-    # Cleanup
     mq.close()
     shutil.rmtree(tmp)
 
@@ -250,13 +260,13 @@ def test_list_all_entries():
     t2 = f"task-{uuid.uuid4().hex[:8]}"
 
     wt1 = wt.create(t1, "agent-a")
-    with open(os.path.join(wt1, "list.py"), "w") as f:
-        f.write("def list_test(): return 'a'\n")
+    with open(os.path.join(wt1, "list_a.py"), "w") as f:
+        f.write("def list_a(): return 'a'\n")
     wt.commit_changes(t1, "List test A", "agent-a")
 
     wt2 = wt.create(t2, "agent-b")
-    with open(os.path.join(wt2, "list.py"), "w") as f:
-        f.write("def list_test(): return 'b'\n")
+    with open(os.path.join(wt2, "list_b.py"), "w") as f:
+        f.write("def list_b(): return 'b'\n")
     wt.commit_changes(t2, "List test B", "agent-b")
 
     b1 = f"od/agent-a/{t1[:8]}"
@@ -269,15 +279,14 @@ def test_list_all_entries():
     r1 = mq.process_next()
     assert r1.status == "merged"
 
-    # List all — should show both (one merged, one pending)
+    # List all — should show both
     all_entries = mq.list_all()
     assert len(all_entries) == 2, f"Expected 2 entries, got {len(all_entries)}"
 
     statuses = {e["status"] for e in all_entries}
-    assert "merged" in statuses, "Should have merged entry"
-    assert "pending" in statuses, "Should have pending entry"
+    assert "merged" in statuses
+    assert "pending" in statuses
 
-    # Cleanup
     mq.close()
     shutil.rmtree(tmp)
 
@@ -307,16 +316,106 @@ def test_priority_ordering():
     # Process — should get priority 1 first, then 5, then 10
     r1 = mq.process_next()
     assert r1.status == "merged"
-    assert r1.task_id == tasks[1][0], f"Expected task with priority 1 first"
+    assert r1.task_id == tasks[1][0], "Expected priority 1 first"
 
     r2 = mq.process_next()
     assert r2.status == "merged"
-    assert r2.task_id == tasks[2][0], f"Expected task with priority 5 second"
+    assert r2.task_id == tasks[2][0], "Expected priority 5 second"
 
     r3 = mq.process_next()
     assert r3.status == "merged"
-    assert r3.task_id == tasks[0][0], f"Expected task with priority 10 third"
+    assert r3.task_id == tasks[0][0], "Expected priority 10 third"
 
-    # Cleanup
+    mq.close()
+    shutil.rmtree(tmp)
+
+
+# =========================================================================
+# H. FSPROTOCOL INTEGRATION — AUTO_MERGE
+# =========================================================================
+
+def test_fsprotocol_auto_merge():
+    """FsProtocol.complete(auto_merge=True) should enqueue to MergeQueue."""
+    tmp = tempfile.mkdtemp(prefix="od-test-fsproto-")
+    repo = setup_git(os.path.join(tmp, "repo"))
+    wt = WorktreeManager(repo)
+    mq = MergeQueue(repo)
+    fs = FsProtocol(os.path.join(tmp, "workspace"), merge_queue=mq, worktree_manager=wt)
+
+    # Create and claim a task with worktree
+    t1 = fs.submit("Test auto-merge", from_agent="hermes")
+    claimed = fs.claim("agent-a", t1, use_worktree=True)
+
+    # Verify worktree was created
+    assert claimed.worktree is not None, "Worktree should be created"
+
+    # Create a file in the worktree
+    with open(os.path.join(claimed.worktree, "auto.py"), "w") as f:
+        f.write("def auto(): return 'merged'\n")
+
+    # Complete with auto_merge
+    fs.complete(t1, result={"files": ["auto.py"]}, auto_merge=True)
+
+    # Verify task is in done folder
+    done_tasks = fs.list_tasks("done")
+    assert any(t.id == t1 for t in done_tasks), "Task should be in done folder"
+
+    # Verify task was enqueued to MergeQueue
+    pending = mq.list_pending()
+    assert any(p["task_id"] == t1 for p in pending), "Task should be in MergeQueue"
+
+    mq.close()
+    shutil.rmtree(tmp)
+
+
+# =========================================================================
+# I. FSPROTOCOL INTEGRATION — SUBMIT_MERGE_READY
+# =========================================================================
+
+def test_fsprotocol_submit_merge_ready():
+    """FsProtocol.submit_merge_ready() convenience method."""
+    tmp = tempfile.mkdtemp(prefix="od-test-merge-ready-")
+    repo = setup_git(os.path.join(tmp, "repo"))
+    wt = WorktreeManager(repo)
+    mq = MergeQueue(repo)
+    fs = FsProtocol(os.path.join(tmp, "workspace"), merge_queue=mq, worktree_manager=wt)
+
+    # Create and claim a task
+    t1 = fs.submit("Test merge ready", from_agent="hermes")
+    claimed = fs.claim("agent-b", t1, use_worktree=True)
+
+    # Create a file
+    with open(os.path.join(claimed.worktree, "ready.py"), "w") as f:
+        f.write("def ready(): return True\n")
+
+    # Submit merge ready
+    fs.submit_merge_ready(t1, result={"status": "ready"})
+
+    # Verify
+    pending = mq.list_pending()
+    assert any(p["task_id"] == t1 for p in pending)
+
+    mq.close()
+    shutil.rmtree(tmp)
+
+
+# =========================================================================
+# J. CLEANUP_AFTER_MERGE (public method)
+# =========================================================================
+
+def test_cleanup_after_merge_public():
+    """Test the public cleanup_after_merge method."""
+    tmp = tempfile.mkdtemp(prefix="od-test-cleanup-pub-")
+    repo = setup_git(os.path.join(tmp, "repo"))
+    mq = MergeQueue(repo)
+
+    t1 = f"task-{uuid.uuid4().hex[:8]}"
+
+    # Enqueue a task
+    mq.enqueue(t1, "od/agent/test", "/tmp/fake-worktree", "agent")
+
+    # Call cleanup (worktree doesn't exist, should not crash)
+    mq.cleanup_after_merge(t1, success=True)
+
     mq.close()
     shutil.rmtree(tmp)

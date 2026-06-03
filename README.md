@@ -63,32 +63,36 @@ fs.complete(task_id, result={"files": ["api.py"]})
 ### MergeQueue — Zarządzanie merge'ami
 
 ```python
-from overdrop import WorktreeManager, MergeQueue
+from overdrop import WorktreeManager, MergeQueue, FsProtocol
 
 # Setup
-wt = WorktreeManager("/path/to/repo")
-mq = MergeQueue("/path/to/repo")
+repo = "/path/to/repo"
+wt = WorktreeManager(repo)
+mq = MergeQueue(repo)
+fs = FsProtocol("workspace/", merge_queue=mq, worktree_manager=wt)
 
-# Utwórz worktree dla zadania
-worktree_path = wt.create("task-123", "agent-a")
+# Tworzenie taska z worktree
+task_id = fs.submit("Add feature X", from_agent="hermes")
+claimed = fs.claim("agent-a", task_id, use_worktree=True)
 
-# Pracuj w izolowanym worktree
-# ... (agent implementuje feature) ...
+# Praca w izolowanym worktree
+with open(os.path.join(claimed.worktree, "feature.py"), "w") as f:
+    f.write("def feature(): return 'X'\n")
 
-# Commit changes
-wt.commit_changes("task-123", "Add auth feature", "agent-a")
+# Auto-merge po complete
+fs.complete(task_id, result={"files": ["feature.py"]}, auto_merge=True)
 
-# Enqueue do merge queue
-mq.enqueue("task-123", "od/agent-a/task-123", worktree_path, "agent-a")
+# Lub ręcznie
+fs.submit_merge_ready(task_id, result={"status": "ready"})
 
-# Przetwórz merge (FIFO z priorytetami)
+# Przetwarzanie merge queue
 result = mq.process_next()
 print(f"Status: {result.status}")  # merged | conflict | failed
 
 # Dodatkowe akcje
-mq.cancel("task-123")      # Anuluj pending
-mq.retry("task-123")       # Retry po conflict/failed
-all_entries = mq.list_all() # Wszystkie wpisy
+mq.cancel(task_id)      # Anuluj pending
+mq.retry(task_id)       # Retry po conflict/failed
+mq.cleanup_after_merge(task_id, success=True)  # Cleanup
 ```
 
 ### Conflict Resolution Pipeline
@@ -100,10 +104,19 @@ Pending → Dry-run → Auto-merge (success) → Merged
               ↓
          Tier 1 (≤2 files) → Rebase/Cherry-pick
               ↓ (failed)
-         Tier 2 (≤5 files) → AI Resolution
+         Tier 2 (≤5 files) → AI Resolution (callback)
               ↓ (failed)
          Tier 3 (>5 files) → Human Escalation
 ```
+
+**Poziomy konfliktów:**
+
+| Level | Opis | Akcja |
+|-------|------|-------|
+| 0 | Auto-resolved | Commit merge |
+| 1 | Simple (≤2 files) | Tier 1: Rebase |
+| 2 | Moderate (≤5 files) | Tier 2: AI resolver |
+| 3 | Complex (>5 files) | Tier 3: Human escalation |
 
 ## Struktura projektu
 
@@ -173,18 +186,19 @@ open http://localhost:7737
 # Wszystkie testy
 PYTHONPATH=python .venv/bin/pytest tests/ -v
 
-# Tylko testy integracyjne
-PYTHONPATH=python .venv/bin/pytest tests/integration/ -v
-
-# Tylko testy MergeQueue
+# Tylko testy integracyjne MergeQueue
 PYTHONPATH=python .venv/bin/pytest tests/integration/test_merge_queue.py -v
+
+# Z coverage
+PYTHONPATH=python .venv/bin/pytest tests/ --cov=overdrop
 ```
 
 ### Pokrycie testowe
 - ✅ MailBus (send, receive, broadcast, archive)
 - ✅ FsProtocol (submit, claim, complete, fail, block, retry)
-- ✅ MergeQueue (enqueue, process, cancel, retry, priority)
+- ✅ MergeQueue (enqueue, process, cancel, retry, priority, cleanup)
 - ✅ WorktreeManager (create, remove, cleanup)
+- ✅ FsProtocol + MergeQueue integration (auto_merge, submit_merge_ready)
 - ✅ Conflict resolution (Tier 1-3)
 
 ## Agent Adapters
