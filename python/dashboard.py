@@ -1,23 +1,175 @@
 #!/usr/bin/env python3
 """OverDrop Web Dashboard v3 — Live observability + full task control."""
 
-import http.server, socketserver, json, os, sys, time, threading, uuid
+import http.server
+import json
+import logging
+import os
+import secrets
+import socketserver
+import sys
+import time
+import threading
+from collections import defaultdict
 from pathlib import Path
-from datetime import datetime, timezone
 from urllib.parse import urlparse, parse_qs
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from overdrop import FsProtocol, MailBus, MessageType
 
+logger = logging.getLogger("overdrop.dashboard")
+
+# ---- CONFIG ----
+
+_config = {}
+_config_path = os.path.join(os.path.dirname(__file__), "..", "config", "overdrop.json")
+
+
+def _load_config():
+    """Load config from file. Supports env var overrides."""
+    global _config
+    try:
+        with open(_config_path) as f:
+            _config = json.load(f)
+    except FileNotFoundError:
+        _config = {}
+
+    # Env var overrides (highest priority)
+    if os.environ.get("OVERDROP_API_KEY"):
+        _config["api_key"] = os.environ["OVERDROP_API_KEY"]
+    if os.environ.get("OVERDROP_RATE_LIMIT"):
+        _config.setdefault("rate_limit", {})["enabled"] = os.environ["OVERDROP_RATE_LIMIT"] == "1"
+    if os.environ.get("OVERDROP_AI_RESOLVER_ENABLED"):
+        _config.setdefault("ai_resolver", {})["enabled"] = os.environ["OVERDROP_AI_RESOLVER_ENABLED"] == "1"
+
+    return _config
+
+
+def _get_config():
+    if not _config:
+        _load_config()
+    return _config
+
+
+# ---- AUTH MIDDLEWARE ----
+
+class RateLimiter:
+    """Simple token bucket rate limiter."""
+
+    def __init__(self, max_requests: int = 100, window_seconds: int = 60):
+        self.max_requests = max_requests
+        self.window = window_seconds
+        self._requests: dict[str, list[float]] = defaultdict(list)
+        self._lock = threading.Lock()
+
+    def is_allowed(self, key: str = "default") -> bool:
+        """Check if request is allowed. Returns True if within limit."""
+        now = time.time()
+        with self._lock:
+            # Clean old entries
+            self._requests[key] = [
+                t for t in self._requests[key]
+                if now - t < self.window
+            ]
+            if len(self._requests[key]) >= self.max_requests:
+                return False
+            self._requests[key].append(now)
+            return True
+
+    def remaining(self, key: str = "default") -> int:
+        """Get remaining requests in current window."""
+        now = time.time()
+        with self._lock:
+            self._requests[key] = [
+                t for t in self._requests[key]
+                if now - t < self.window
+            ]
+            return max(0, self.max_requests - len(self._requests[key]))
+
+
+_rate_limiter = None
+
+
+def _get_rate_limiter() -> RateLimiter:
+    global _rate_limiter
+    if _rate_limiter is None:
+        cfg = _get_config().get("rate_limit", {})
+        _rate_limiter = RateLimiter(
+            max_requests=cfg.get("max_requests", 100),
+            window_seconds=cfg.get("window_seconds", 60),
+        )
+    return _rate_limiter
+
+
+def _check_auth(handler) -> bool:
+    """Check API key authentication. Returns True if allowed."""
+    cfg = _get_config()
+    api_key = cfg.get("api_key")
+
+    # No key configured = no auth required
+    if not api_key:
+        return True
+
+    # Check header
+    header_name = cfg.get("api_key_header", "X-API-Key")
+    provided = handler.headers.get(header_name)
+
+    # Also check Authorization: Bearer <key>
+    if not provided:
+        auth = handler.headers.get("Authorization", "")
+        if auth.startswith("Bearer "):
+            provided = auth[7:]
+
+    if not provided:
+        _json_response(handler, {"error": "Missing API key"}, 401)
+        return False
+
+    if not secrets.compare_digest(provided, api_key):
+        _json_response(handler, {"error": "Invalid API key"}, 403)
+        return False
+
+    return True
+
+
+def _check_rate_limit(handler) -> bool:
+    """Check rate limit. Returns True if allowed."""
+    cfg = _get_config()
+    if not cfg.get("rate_limit", {}).get("enabled", False):
+        return True
+
+    limiter = _get_rate_limiter()
+    client_ip = handler.client_address[0]
+
+    if not limiter.is_allowed(client_ip):
+        handler.send_response(429)
+        handler.send_header("Content-Type", "application/json")
+        handler.send_header("Retry-After", str(limiter.window))
+        handler.end_headers()
+        handler.wfile.write(json.dumps({"error": "Rate limit exceeded"}).encode())
+        return False
+
+    # Add rate limit headers
+    handler.send_header("X-RateLimit-Limit", str(limiter.max_requests))
+    handler.send_header("X-RateLimit-Remaining", str(limiter.remaining(client_ip)))
+    return True
+
+
+# ---- SSE MANAGER ----
+
 class SSEManager:
     def __init__(self):
         self._clients = []
         self._lock = threading.Lock()
+
     def add(self, h):
-        with self._lock: self._clients.append(h)
+        with self._lock:
+            self._clients.append(h)
+
     def remove(self, h):
         with self._lock:
-            if h in self._clients: self._clients.remove(h)
+            if h in self._clients:
+                self._clients.remove(h)
+
     def broadcast(self, event_type, data):
         msg = f"event: {event_type}\ndata: {json.dumps(data, default=str)}\n\n"
         with self._lock:
@@ -26,22 +178,24 @@ class SSEManager:
                 try:
                     c.wfile.write(msg.encode("utf-8"))
                     c.wfile.flush()
-                except:
+                except Exception:
                     dead.append(c)
-            for d in dead: self._clients.remove(d)
+            for d in dead:
+                self._clients.remove(d)
+
 
 sse = SSEManager()
-HTML = open(os.path.join(os.path.dirname(__file__), "..", "dashboard.html")).read()
-
-_ws = None; _fs = None; _bus = None
 _html_cache = None
+_ws = None
+_fs = None
+_bus = None
+
 
 def get_html():
     """Load HTML from modular dashboard/ or fallback to monolith."""
     global _html_cache
     if _html_cache:
         return _html_cache
-    # Try modular dashboard first
     modular = os.path.join(os.path.dirname(__file__), "..", "dashboard", "index.html")
     if os.path.exists(modular):
         _html_cache = open(modular).read()
@@ -49,10 +203,13 @@ def get_html():
         _html_cache = open(os.path.join(os.path.dirname(__file__), "..", "dashboard.html")).read()
     return _html_cache
 
+
 def get_fs():
     global _fs
-    if not _fs: _fs = FsProtocol(str(_ws))
+    if not _fs:
+        _fs = FsProtocol(str(_ws))
     return _fs
+
 
 def get_bus():
     global _bus
@@ -60,6 +217,7 @@ def get_bus():
         _bus = MailBus(os.path.join(str(_ws), "overdrop.db"))
         _bus.connect()
     return _bus
+
 
 def _json_response(handler, data, status=200):
     body = json.dumps(data, default=str).encode("utf-8")
@@ -70,11 +228,13 @@ def _json_response(handler, data, status=200):
     handler.end_headers()
     handler.wfile.write(body)
 
+
 def _read_body(handler):
     length = int(handler.headers.get("Content-Length", 0))
     if length == 0:
         return {}
     return json.loads(handler.rfile.read(length))
+
 
 def _find_task_full(task_id):
     """Find task by full ID or prefix across all folders."""
@@ -85,7 +245,13 @@ def _find_task_full(task_id):
                 return t, fld
     return None, None
 
+
 # ---- API HANDLERS ----
+
+def api_health(handler):
+    """GET /health — health check (no auth required)."""
+    _json_response(handler, {"status": "ok", "version": "3.0.0"})
+
 
 def api_create_task(handler, body):
     """POST /api/tasks — create new task."""
@@ -100,6 +266,7 @@ def api_create_task(handler, body):
     bus.send(MessageType.BROADCAST, sender="dashboard", recipient="@all",
              payload={"event": "task_created", "task_id": task_id, "title": title, "assignee": assignee})
     _json_response(handler, {"ok": True, "task_id": task_id})
+
 
 def api_claim_task(handler, body, task_id):
     """POST /api/tasks/:id/claim — claim task for agent."""
@@ -120,6 +287,7 @@ def api_claim_task(handler, body, task_id):
              payload={"event": "task_claimed", "agent": agent, "task": task.title})
     _json_response(handler, {"ok": True, "task_id": task.id})
 
+
 def api_complete_task(handler, body, task_id):
     """POST /api/tasks/:id/done — complete task."""
     fs = get_fs()
@@ -138,6 +306,7 @@ def api_complete_task(handler, body, task_id):
              payload={"event": "task_completed", "task": task.title, "result": result})
     _json_response(handler, {"ok": True, "task_id": task.id})
 
+
 def api_block_task(handler, body, task_id):
     """POST /api/tasks/:id/block — block task."""
     fs = get_fs()
@@ -154,6 +323,7 @@ def api_block_task(handler, body, task_id):
              payload={"event": "task_blocked", "task": task.title, "reason": reason})
     _json_response(handler, {"ok": True, "task_id": task.id})
 
+
 def api_unblock_task(handler, body, task_id):
     """POST /api/tasks/:id/unblock — unblock task back to inbox."""
     fs = get_fs()
@@ -168,6 +338,7 @@ def api_unblock_task(handler, body, task_id):
     bus.send(MessageType.BROADCAST, sender="dashboard", recipient="@all",
              payload={"event": "task_unblocked", "task": task.title})
     _json_response(handler, {"ok": True, "task_id": task.id})
+
 
 def api_fail_task(handler, body, task_id):
     """POST /api/tasks/:id/fail — fail task."""
@@ -187,6 +358,7 @@ def api_fail_task(handler, body, task_id):
              payload={"event": "task_failed", "task": task.title, "error": error})
     _json_response(handler, {"ok": True, "task_id": task.id})
 
+
 def api_delete_task(handler, body, task_id):
     """DELETE /api/tasks/:id — delete task from any folder."""
     fs = get_fs()
@@ -204,6 +376,7 @@ def api_delete_task(handler, body, task_id):
     bus.send(MessageType.BROADCAST, sender="dashboard", recipient="@all",
              payload={"event": "task_deleted", "task": task.title, "from": fld})
     _json_response(handler, {"ok": True, "task_id": task.id})
+
 
 def api_task_details(handler, task_id):
     """GET /api/tasks/:id — full task details."""
@@ -231,6 +404,7 @@ def api_task_details(handler, task_id):
         "created_at": task.created_at,
     }
     _json_response(handler, data)
+
 
 def api_list_all_tasks(handler, params):
     """GET /api/tasks — list all tasks with optional filters."""
@@ -266,6 +440,7 @@ def api_list_all_tasks(handler, params):
             })
     _json_response(handler, tasks)
 
+
 def _load_known_agents():
     """Load known agents from pre-generated JSON file."""
     json_path = os.path.join(str(_ws), "known_agents.json")
@@ -276,8 +451,9 @@ def _load_known_agents():
             agents_list = json.load(f)
         return {a["name"]: a for a in agents_list}
     except Exception as e:
-        print(f"[ERROR] Loading known_agents.json: {e}")
+        logger.error(f"Loading known_agents.json: {e}")
         return {}
+
 
 def _save_known_agents(agents_dict):
     """Save known agents to JSON file."""
@@ -286,7 +462,8 @@ def _save_known_agents(agents_dict):
         with open(json_path, "w") as f:
             json.dump(list(agents_dict.values()), f, indent=2, ensure_ascii=False)
     except Exception as e:
-        print(f"[ERROR] Saving known_agents.json: {e}")
+        logger.error(f"Saving known_agents.json: {e}")
+
 
 # Available models
 AVAILABLE_MODELS = [
@@ -308,9 +485,11 @@ AVAILABLE_MODELS = [
     {"id": "openrouter:google/gemini-2.5-flash", "name": "Gemini 2.5 Flash", "provider": "openrouter", "speed": "fast", "cost": "low"},
 ]
 
+
 def api_models(handler):
     """GET /api/models — list available models."""
     _json_response(handler, AVAILABLE_MODELS)
+
 
 def api_update_agent_model(handler, body, agent_name):
     """POST /api/agents/:name/model — update agent's model."""
@@ -325,9 +504,9 @@ def api_update_agent_model(handler, body, agent_name):
     known[agent_name]["model"] = model_id
     _save_known_agents(known)
 
-    # Broadcast update
     sse.broadcast("agent_model", {"agent": agent_name, "model": model_id})
     _json_response(handler, {"ok": True, "agent": agent_name, "model": model_id})
+
 
 def api_agents(handler):
     """GET /api/agents — intelligent agent list with roles and status."""
@@ -335,7 +514,6 @@ def api_agents(handler):
     known = _load_known_agents()
     agents = {}
 
-    # Start with known agents from manifest
     for name, info in known.items():
         agents[name] = {
             **info,
@@ -343,11 +521,10 @@ def api_agents(handler):
             "current_task": None, "last_active": None, "live_status": "idle",
         }
 
-    # Add Hermes (not in manifest)
     if "hermes" not in agents:
         agents["hermes"] = {
             "name": "hermes", "role": "coordinator", "type": "hermes",
-            "description": "Hermes Agent — główny orkiestrator AI, narzędzia, pamięć",
+            "description": "Hermes Agent — główny orkiestrator AI",
             "capabilities": ["orchestration", "tools", "memory", "cron", "delegation"],
             "model": "current", "manifest_status": "active",
             "subagents": [], "tasks_active": 0, "tasks_done": 0,
@@ -355,7 +532,6 @@ def api_agents(handler):
             "last_active": None, "live_status": "idle",
         }
 
-    # Update with live task data
     for fld in ["inbox", "active", "done", "failed", "blocked", "feedback"]:
         for t in fs.list_tasks(fld):
             if t.assignee:
@@ -380,7 +556,6 @@ def api_agents(handler):
                 elif t.status.value == "failed":
                     agents[a]["tasks_failed"] += 1
 
-    # Sort: active first, then by type priority, then by task count
     type_order = {"orchestrator": 0, "hermes": 1, "pipeline": 2, "specialist": 3, "factory": 4, "monitoring": 5, "unknown": 9}
     result = sorted(agents.values(), key=lambda a: (
         -a["tasks_active"],
@@ -397,7 +572,6 @@ def api_merge_queue(handler):
         import sqlite3
         conn = sqlite3.connect(db_path)
         conn.row_factory = sqlite3.Row
-        # Auto-create table if missing
         conn.execute("""CREATE TABLE IF NOT EXISTS merge_queue (
             task_id TEXT PRIMARY KEY, branch TEXT NOT NULL, worktree TEXT NOT NULL,
             agent_id TEXT NOT NULL, priority INTEGER DEFAULT 5, status TEXT DEFAULT 'pending',
@@ -409,8 +583,7 @@ def api_merge_queue(handler):
             "SELECT * FROM merge_queue WHERE status IN ('pending', 'dry_run', 'resolving') ORDER BY priority DESC, created_at ASC"
         ).fetchall()
         conn.close()
-        result = [dict(r) for r in rows]
-        _json_response(handler, result)
+        _json_response(handler, [dict(r) for r in rows])
     except Exception as e:
         _json_response(handler, {"error": str(e)}, 500)
 
@@ -422,15 +595,12 @@ def api_trigger_merge(handler, task_id):
         import sqlite3
         conn = sqlite3.connect(db_path)
         conn.row_factory = sqlite3.Row
-        
-        # Check if already in queue
+
         existing = conn.execute("SELECT * FROM merge_queue WHERE task_id=?", (task_id,)).fetchone()
         if existing:
             conn.close()
-            _json_response(handler, {"error": "Already in queue", "status": existing["status"]}, 409)
-            return
-        
-        # Get task info from filesystem
+            return _json_response(handler, {"error": "Already in queue", "status": existing["status"]}, 409)
+
         fs = get_fs()
         task = None
         for status in ["active", "done", "inbox"]:
@@ -440,22 +610,20 @@ def api_trigger_merge(handler, task_id):
                     break
             if task:
                 break
-        
+
         if not task:
             conn.close()
-            _json_response(handler, {"error": "Task not found"}, 404)
-            return
-        
+            return _json_response(handler, {"error": "Task not found"}, 404)
+
         branch = f"od/{task.assignee or 'unknown'}/{task_id[:8]}"
         worktree_path = f"/tmp/overdrop-worktrees/od-{task_id[:8]}-{task.assignee or 'unknown'}"
-        
+
         conn.execute(
             "INSERT OR REPLACE INTO merge_queue (task_id, branch, worktree, agent_id, priority, status) VALUES (?, ?, ?, ?, ?, 'pending')",
             (task_id, branch, worktree_path, task.assignee or "unknown", task.priority)
         )
         conn.commit()
         conn.close()
-        
         _json_response(handler, {"ok": True, "task_id": task_id})
     except Exception as e:
         _json_response(handler, {"error": str(e)}, 500)
@@ -468,26 +636,21 @@ def api_process_merge(handler, task_id):
         import sqlite3
         conn = sqlite3.connect(db_path)
         conn.row_factory = sqlite3.Row
-        
+
         row = conn.execute("SELECT * FROM merge_queue WHERE task_id=?", (task_id,)).fetchone()
         if not row:
             conn.close()
-            _json_response(handler, {"error": "Not in queue"}, 404)
-            return
-        
+            return _json_response(handler, {"error": "Not in queue"}, 404)
+
         if row["status"] != "pending":
             conn.close()
-            _json_response(handler, {"error": f"Cannot process: status is {row['status']}"}, 409)
-            return
-        
-        # Update status to processing
+            return _json_response(handler, {"error": f"Cannot process: status is {row['status']}"}, 409)
+
         conn.execute("UPDATE merge_queue SET status='dry_run' WHERE task_id=?", (task_id,))
         conn.commit()
         conn.close()
-        
-        # Broadcast SSE update
+
         sse.broadcast("merge_queue", {"task_id": task_id, "status": "dry_run", "action": "process"})
-        
         _json_response(handler, {"ok": True, "task_id": task_id, "status": "dry_run"})
     except Exception as e:
         _json_response(handler, {"error": str(e)}, 500)
@@ -500,25 +663,21 @@ def api_cancel_merge(handler, task_id):
         import sqlite3
         conn = sqlite3.connect(db_path)
         conn.row_factory = sqlite3.Row
-        
+
         row = conn.execute("SELECT * FROM merge_queue WHERE task_id=?", (task_id,)).fetchone()
         if not row:
             conn.close()
-            _json_response(handler, {"error": "Not in queue"}, 404)
-            return
-        
+            return _json_response(handler, {"error": "Not in queue"}, 404)
+
         if row["status"] not in ("pending", "dry_run"):
             conn.close()
-            _json_response(handler, {"error": f"Cannot cancel: status is {row['status']}"}, 409)
-            return
-        
+            return _json_response(handler, {"error": f"Cannot cancel: status is {row['status']}"}, 409)
+
         conn.execute("UPDATE merge_queue SET status='cancelled' WHERE task_id=?", (task_id,))
         conn.commit()
         conn.close()
-        
-        # Broadcast SSE update
+
         sse.broadcast("merge_queue", {"task_id": task_id, "status": "cancelled", "action": "cancel"})
-        
         _json_response(handler, {"ok": True, "task_id": task_id})
     except Exception as e:
         _json_response(handler, {"error": str(e)}, 500)
@@ -531,25 +690,21 @@ def api_retry_merge(handler, task_id):
         import sqlite3
         conn = sqlite3.connect(db_path)
         conn.row_factory = sqlite3.Row
-        
+
         row = conn.execute("SELECT * FROM merge_queue WHERE task_id=?", (task_id,)).fetchone()
         if not row:
             conn.close()
-            _json_response(handler, {"error": "Not in queue"}, 404)
-            return
-        
+            return _json_response(handler, {"error": "Not in queue"}, 404)
+
         if row["status"] not in ("conflict", "failed"):
             conn.close()
-            _json_response(handler, {"error": f"Cannot retry: status is {row['status']}"}, 409)
-            return
-        
+            return _json_response(handler, {"error": f"Cannot retry: status is {row['status']}"}, 409)
+
         conn.execute("UPDATE merge_queue SET status='pending', error_log=NULL WHERE task_id=?", (task_id,))
         conn.commit()
         conn.close()
-        
-        # Broadcast SSE update
+
         sse.broadcast("merge_queue", {"task_id": task_id, "status": "pending", "action": "retry"})
-        
         _json_response(handler, {"ok": True, "task_id": task_id})
     except Exception as e:
         _json_response(handler, {"error": str(e)}, 500)
@@ -558,35 +713,51 @@ def api_retry_merge(handler, task_id):
 # ---- HTTP HANDLER ----
 
 class Handler(http.server.BaseHTTPRequestHandler):
-    def log_message(self, *a): pass
+    def log_message(self, format, *args):
+        pass
 
     def do_OPTIONS(self):
         self.send_response(200)
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-API-Key, Authorization")
         self.end_headers()
+
+    def _check_request_auth(self) -> bool:
+        """Check auth + rate limit for API endpoints. Returns True if allowed."""
+        if not _check_auth(self):
+            return False
+        if not _check_rate_limit(self):
+            return False
+        return True
 
     def do_GET(self):
         parsed = urlparse(self.path)
         p = parsed.path.rstrip("/")
         params = parse_qs(parsed.query)
 
+        # Public endpoints (no auth)
         if p in ("", "/"):
-            self._html()
+            return self._html()
         elif p.startswith("/css/") or p.startswith("/js/"):
-            self._static(p)
+            return self._static(p)
         elif p == "/events":
-            self._sse()
-        elif p == "/api/tasks":
+            return self._sse()
+        elif p == "/health":
+            return api_health(self)
+
+        # Protected API endpoints
+        if not self._check_request_auth():
+            return
+
+        if p == "/api/tasks":
             task_id = params.get("id", [None])[0]
             if task_id:
                 api_task_details(self, task_id)
             else:
                 api_list_all_tasks(self, params)
         elif p.startswith("/api/tasks/") and p.count("/") == 3:
-            task_id = p.split("/")[3]
-            api_task_details(self, task_id)
+            api_task_details(self, p.split("/")[3])
         elif p == "/api/agents":
             api_agents(self)
         elif p == "/api/models":
@@ -594,17 +765,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif p == "/api/merge-queue":
             api_merge_queue(self)
         elif p.startswith("/api/merge-queue/") and p.endswith("/trigger"):
-            task_id = p.split("/")[3]
-            api_trigger_merge(self, task_id)
+            api_trigger_merge(self, p.split("/")[3])
         elif p.startswith("/api/merge-queue/") and p.endswith("/process"):
-            task_id = p.split("/")[3]
-            api_process_merge(self, task_id)
+            api_process_merge(self, p.split("/")[3])
         elif p.startswith("/api/merge-queue/") and p.endswith("/cancel"):
-            task_id = p.split("/")[3]
-            api_cancel_merge(self, task_id)
+            api_cancel_merge(self, p.split("/")[3])
         elif p.startswith("/api/merge-queue/") and p.endswith("/retry"):
-            task_id = p.split("/")[3]
-            api_retry_merge(self, task_id)
+            api_retry_merge(self, p.split("/")[3])
         else:
             self.send_error(404)
 
@@ -613,47 +780,44 @@ class Handler(http.server.BaseHTTPRequestHandler):
         p = parsed.path.rstrip("/")
         body = _read_body(self)
 
+        # Protected API endpoints
+        if not self._check_request_auth():
+            return
+
         if p == "/api/tasks":
             api_create_task(self, body)
         elif "/claim" in p:
-            task_id = p.split("/")[3]
-            api_claim_task(self, body, task_id)
+            api_claim_task(self, body, p.split("/")[3])
         elif "/done" in p:
-            task_id = p.split("/")[3]
-            api_complete_task(self, body, task_id)
+            api_complete_task(self, body, p.split("/")[3])
         elif "/block" in p and "unblock" not in p:
-            task_id = p.split("/")[3]
-            api_block_task(self, body, task_id)
+            api_block_task(self, body, p.split("/")[3])
         elif "/unblock" in p:
-            task_id = p.split("/")[3]
-            api_unblock_task(self, body, task_id)
+            api_unblock_task(self, body, p.split("/")[3])
         elif "/fail" in p:
-            task_id = p.split("/")[3]
-            api_fail_task(self, body, task_id)
+            api_fail_task(self, body, p.split("/")[3])
         elif p.startswith("/api/agents/") and p.endswith("/model"):
-            agent_name = p.split("/")[3]
-            api_update_agent_model(self, body, agent_name)
+            api_update_agent_model(self, body, p.split("/")[3])
         elif p.startswith("/api/merge-queue/") and p.endswith("/trigger"):
-            task_id = p.split("/")[3]
-            api_trigger_merge(self, task_id)
+            api_trigger_merge(self, p.split("/")[3])
         elif p.startswith("/api/merge-queue/") and p.endswith("/process"):
-            task_id = p.split("/")[3]
-            api_process_merge(self, task_id)
+            api_process_merge(self, p.split("/")[3])
         elif p.startswith("/api/merge-queue/") and p.endswith("/cancel"):
-            task_id = p.split("/")[3]
-            api_cancel_merge(self, task_id)
+            api_cancel_merge(self, p.split("/")[3])
         elif p.startswith("/api/merge-queue/") and p.endswith("/retry"):
-            task_id = p.split("/")[3]
-            api_retry_merge(self, task_id)
+            api_retry_merge(self, p.split("/")[3])
         else:
             self.send_error(404)
 
     def do_DELETE(self):
+        # Protected API endpoints
+        if not self._check_request_auth():
+            return
+
         parsed = urlparse(self.path)
         p = parsed.path.rstrip("/")
         if p.startswith("/api/tasks/"):
-            task_id = p.split("/")[3]
-            api_delete_task(self, {}, task_id)
+            api_delete_task(self, {}, p.split("/")[3])
         else:
             self.send_error(404)
 
@@ -689,10 +853,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 time.sleep(15)
                 self.wfile.write(b": heartbeat\n\n")
                 self.wfile.flush()
-        except:
+        except Exception:
             pass
         finally:
             sse.remove(self)
+
 
 def poller():
     """Background poller — broadcasts live state every 2s."""
@@ -746,30 +911,39 @@ def poller():
                         "msg": json.dumps(m.payload)[:80],
                     })
                     bus.mark_read(m.id)
-            except:
+            except Exception:
                 pass
 
         except Exception as e:
-            print(f"Poller: {e}")
+            logger.error(f"Poller: {e}")
         time.sleep(2)
+
 
 class ThreadingHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
 
+
 def serve(workspace=None, port=7737):
     global _ws
+    _load_config()
     _ws = Path(workspace or ".overdrop").resolve()
     _ws.mkdir(parents=True, exist_ok=True)
     for f in ["inbox", "active", "done", "failed", "blocked", "feedback"]:
         (_ws / f).mkdir(exist_ok=True)
     threading.Thread(target=poller, daemon=True).start()
     srv = ThreadingHTTPServer(("0.0.0.0", port), Handler)
-    print(f"⬡ OverDrop Dashboard → http://localhost:{port}")
+
+    cfg = _get_config()
+    auth_status = "API key required" if cfg.get("api_key") else "No auth (open access)"
+    rate_status = "enabled" if cfg.get("rate_limit", {}).get("enabled") else "disabled"
+    logger.info(f"⬡ OverDrop Dashboard → http://localhost:{port} | Auth: {auth_status} | Rate limit: {rate_status}")
+
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
         print("\n👋")
         srv.shutdown()
+
 
 if __name__ == "__main__":
     import argparse

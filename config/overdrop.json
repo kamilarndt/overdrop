@@ -1,0 +1,17 @@
+{
+    "api_key": null,
+    "api_key_header": "X-API-Key",
+    "rate_limit": {
+        "enabled": false,
+        "max_requests": 100,
+        "window_seconds": 60
+    },
+    "cors": {
+        "allow_origins": ["*"]
+    },
+    "ai_resolver": {
+        "enabled": false,
+        "model": "router://deepseek-v4-flash",
+        "timeout": 30
+    }
+}
