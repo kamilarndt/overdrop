@@ -485,6 +485,9 @@ def api_process_merge(handler, task_id):
         conn.commit()
         conn.close()
         
+        # Broadcast SSE update
+        sse.broadcast("merge_queue", {"task_id": task_id, "status": "dry_run", "action": "process"})
+        
         _json_response(handler, {"ok": True, "task_id": task_id, "status": "dry_run"})
     except Exception as e:
         _json_response(handler, {"error": str(e)}, 500)
@@ -513,6 +516,9 @@ def api_cancel_merge(handler, task_id):
         conn.commit()
         conn.close()
         
+        # Broadcast SSE update
+        sse.broadcast("merge_queue", {"task_id": task_id, "status": "cancelled", "action": "cancel"})
+        
         _json_response(handler, {"ok": True, "task_id": task_id})
     except Exception as e:
         _json_response(handler, {"error": str(e)}, 500)
@@ -540,6 +546,9 @@ def api_retry_merge(handler, task_id):
         conn.execute("UPDATE merge_queue SET status='pending', error_log=NULL WHERE task_id=?", (task_id,))
         conn.commit()
         conn.close()
+        
+        # Broadcast SSE update
+        sse.broadcast("merge_queue", {"task_id": task_id, "status": "pending", "action": "retry"})
         
         _json_response(handler, {"ok": True, "task_id": task_id})
     except Exception as e:

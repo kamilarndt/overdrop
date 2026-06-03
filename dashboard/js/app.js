@@ -18,6 +18,14 @@ s.addEventListener('tasks', e => {
   populateAgentFilter();
 });
 
+// Merge queue updates from SSE (real-time)
+s.addEventListener('merge_queue', e => {
+  const update = JSON.parse(e.data);
+  console.log('Merge queue update:', update);
+  // Refetch merge queue on any update
+  fetchMergeQueue();
+});
+
 // Activity log from SSE
 s.addEventListener('log', e => {
   const m = JSON.parse(e.data), log = document.getElementById('log');
@@ -31,4 +39,4 @@ fetchModels();
 fetchAgents();
 fetchMergeQueue();
 setInterval(fetchAgents, 5000);
-setInterval(fetchMergeQueue, 5000);
+// No need for setInterval(fetchMergeQueue) — SSE handles updates now
