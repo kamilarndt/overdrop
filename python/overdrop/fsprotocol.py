@@ -108,7 +108,8 @@ class FsProtocol:
         task.result = {**task.result, "error": error}
         
         if task.retry_count < task.max_retries:
-            # Move back to inbox for retry
+            # Move back to inbox for retry — reset assignee so another agent can claim
+            task.assignee = None
             self._move_task("active", "inbox", task_id)
             task.status = TaskStatus.INBOX
             self._write_task("inbox", task)

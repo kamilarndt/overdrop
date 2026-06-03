@@ -73,9 +73,9 @@ async def test_merge():
     mq.enqueue(t1, b1, wt1, "pi")
     mq.enqueue(t2, b2, wt2, "hermes")
 
-    r1 = await mq.process_next()
+    r1 = mq.process_next()
     check("Merge 1", r1 is not None and r1.status == "merged")
-    r2 = await mq.process_next()
+    r2 = mq.process_next()
     check("Merge 2", r2 is not None and r2.status == "merged")
     
     s = mq.get_status(t1)

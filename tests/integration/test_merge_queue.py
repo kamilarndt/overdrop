@@ -73,7 +73,7 @@ async def test_fifo_order_respected(wt_manager, merge_queue):
 
     order = []
     for _ in range(5):
-        result = await merge_queue.process_next()
+        result = merge_queue.process_next()
         if result and result.status == "merged":
             order.append(result.task_id)
 
@@ -106,10 +106,10 @@ async def test_tier1_auto_merge(wt_manager, merge_queue):
     merge_queue.enqueue(t1, b1, wt1, "pi")
     merge_queue.enqueue(t2, b2, wt2, "hermes")
 
-    r1 = await merge_queue.process_next()
+    r1 = merge_queue.process_next()
     assert r1.status == "merged"
 
-    r2 = await merge_queue.process_next()
+    r2 = merge_queue.process_next()
     assert r2.status == "merged"
 
 
@@ -160,11 +160,11 @@ async def test_conflict_detection(wt_manager, merge_queue):
     b2 = f"od/agent-b/{t2[:8]}"
 
     merge_queue.enqueue(t1, b1, wt1, "agent-a")
-    result1 = await merge_queue.process_next()
+    result1 = merge_queue.process_next()
     assert result1.status == "merged"  # first one goes through
 
     merge_queue.enqueue(t2, b2, wt2, "agent-b")
-    result2 = await merge_queue.process_next()
+    result2 = merge_queue.process_next()
     # Should fail with conflict
     assert result2.status in ("conflict", "failed"), \
         f"Expected conflict, got {result2.status}"
@@ -209,7 +209,7 @@ async def test_priority_ordering(wt_manager, merge_queue):
     # Task with priority=1 comes first
     results = []
     for _ in range(3):
-        r = await merge_queue.process_next()
+        r = merge_queue.process_next()
         if r:
             results.append(r.task_id)
     
