@@ -362,10 +362,19 @@ s.addEventListener('log', e => {
 
 // === API CALLS ===
 async function api(method, url, body = null) {
-  const opts = { method, headers: { 'Content-Type': 'application/json' } };
-  if (body) opts.body = JSON.stringify(body);
-  const res = await fetch(url, opts);
-  return res.json();
+  try {
+    const opts = { method, headers: { 'Content-Type': 'application/json' } };
+    if (body) opts.body = JSON.stringify(body);
+    const res = await fetch(url, opts);
+    const data = await res.json();
+    if (!res.ok) {
+      console.error(`API error: ${method} ${url} → ${res.status}`, data);
+    }
+    return data;
+  } catch(e) {
+    console.error(`API request failed: ${method} ${url}`, e);
+    return { error: e.message || 'Network error' };
+  }
 }
 
 async function createTask() {
@@ -386,7 +395,13 @@ async function claimTask(id) {
 
 async function doneTask(id) {
   const resultStr = prompt('Result JSON (optional):', '{}');
-  const result = resultStr ? JSON.parse(resultStr) : { completed_via: 'dashboard' };
+  let result;
+  try {
+    result = resultStr ? JSON.parse(resultStr) : { completed_via: 'dashboard' };
+  } catch(e) {
+    alert('Invalid JSON: ' + e.message);
+    return;
+  }
   await api('POST', `/api/tasks/${id}/done`, { result });
 }
 
