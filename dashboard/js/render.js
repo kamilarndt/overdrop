@@ -57,22 +57,55 @@ function updateAgents() {
 
 function renderMergeQueue() {
   const el = document.getElementById('merge-queue-list');
-  if (!mergeQueue.length) { el.innerHTML = ''; return; }
-  el.innerHTML = mergeQueue.map(m => {
-    const statusColors = { pending: 'var(--y)', dry_run: 'var(--blu)', resolving: 'var(--y)' };
-    const statusIcons = { pending: '⏳', dry_run: '🔍', resolving: '🧠' };
+  if (!mergeQueue.length) { 
+    el.innerHTML = '<div style="text-align:center;color:var(--m);padding:16px">No pending merges</div>'; 
+    return; 
+  }
+  
+  // Table view for merge queue
+  let html = `<table style="width:100%">
+    <thead><tr>
+      <th>Task ID</th><th>Agent</th><th>Status</th><th>Conflict</th><th>Priority</th><th>Actions</th>
+    </tr></thead><tbody>`;
+  
+  mergeQueue.forEach(m => {
+    const statusColors = { 
+      pending: 'var(--y)', dry_run: 'var(--blu)', resolving: 'var(--y)', 
+      merged: 'var(--g)', conflict: 'var(--r)', failed: 'var(--r)' 
+    };
+    const statusIcons = { 
+      pending: '⏳', dry_run: '🔍', resolving: '🧠', 
+      merged: '✅', conflict: '⚠️', failed: '❌' 
+    };
     const color = statusColors[m.status] || 'var(--m)';
     const icon = statusIcons[m.status] || '❓';
-    return `<div class="ai" style="border-left:3px solid ${color};flex-direction:column;gap:4px">
-      <div style="display:flex;align-items:center;gap:6px">
-        <span style="color:${color};font-size:12px">${icon}</span>
-        <span style="font-family:var(--mon);font-size:11px;color:var(--t)">${(m.task_id||'').slice(0,8)}</span>
-        <span style="font-size:10px;color:var(--m);margin-left:auto">${m.status}</span>
-      </div>
-      <div style="font-size:9px;color:var(--m)">Agent: ${m.agent_id} | Branch: ${(m.branch||'').slice(0,30)}</div>
-      <div style="font-size:9px;color:var(--m)">Priority: P${m.priority} | Conflict: ${m.conflict_level||0}</div>
-    </div>`;
-  }).join('');
+    
+    let actions = '';
+    if (m.status === 'pending') {
+      actions = `<button class="btn btn-primary btn-sm" onclick="processMerge('${m.task_id}')">▶ Process</button>
+                 <button class="btn btn-danger btn-sm" onclick="cancelMerge('${m.task_id}')">✕ Cancel</button>`;
+    } else if (m.status === 'conflict' || m.status === 'failed') {
+      actions = `<button class="btn btn-warning btn-sm" onclick="retryMerge('${m.task_id}')">🔄 Retry</button>`;
+    } else if (m.status === 'dry_run' || m.status === 'resolving') {
+      actions = '<span style="color:var(--m);font-size:10px">Processing...</span>';
+    }
+    
+    const conflictBadge = m.conflict_level > 0 
+      ? `<span style="background:var(--rb);color:var(--r);padding:2px 6px;border-radius:4px;font-size:9px">L${m.conflict_level}</span>`
+      : '<span style="color:var(--m);font-size:9px">—</span>';
+    
+    html += `<tr>
+      <td style="font-family:var(--mon);font-size:11px">${(m.task_id||'').slice(0,8)}</td>
+      <td style="font-size:11px">${m.agent_id}</td>
+      <td><span style="color:${color};font-size:11px">${icon} ${m.status}</span></td>
+      <td>${conflictBadge}</td>
+      <td style="font-size:11px">P${m.priority}</td>
+      <td><div class="actions">${actions}</div></td>
+    </tr>`;
+  });
+  
+  html += '</tbody></table>';
+  el.innerHTML = html;
 }
 
 function renderTasks(tasks) {

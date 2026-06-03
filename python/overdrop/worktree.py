@@ -191,20 +191,23 @@ class MergeQueue:
 
     Conflict resolution pipeline:
     1. Auto-merge (git merge) — most cases
-    2. AI-assisted resolution (LLM analyzes conflict) — complex cases
-    3. Human escalation (manual resolution) — unresolvable
+    2. Tier 1: Simple rebase/cherry-pick for few-file conflicts
+    3. AI-assisted resolution (LLM analyzes conflict) — complex cases
+    4. Human escalation (manual resolution) — unresolvable
 
     Backed by SQLite for crash safety.
     """
 
     def __init__(self, repo_path: str, base_branch: str = "main",
                  db_path: str = None,
-                 ai_resolver: Optional[Callable] = None):
+                 ai_resolver: Optional[Callable] = None,
+                 fs=None):
         self.repo = Path(repo_path).resolve()
         self.base_branch = base_branch
         self.bus = MailBus(db_path or f"{repo_path}/.overdrop/overdrop.db")
         self.bus.connect()
         self.ai_resolver = ai_resolver
+        self._fs = fs  # Optional FsProtocol for task status updates
         self._queue: list[MergeRequest] = []
         self._init_db()
 
@@ -272,6 +275,9 @@ class MergeQueue:
             req.status = "merged"
             self._update_db(req)
 
+            # Cleanup worktree
+            self._cleanup_after_merge(req)
+
             # Notify via MailBus
             self.bus.send(
                 MessageType.BROADCAST, sender="merge-queue", recipient="@all",
@@ -292,6 +298,7 @@ class MergeQueue:
         if resolved:
             req.status = "merged"
             self._update_db(req)
+            self._cleanup_after_merge(req)
             self.bus.send(
                 MessageType.BROADCAST, sender="merge-queue", recipient="@all",
                 payload={"event": "merge_completed", "task_id": req.task_id, "branch": req.branch},
@@ -310,20 +317,113 @@ class MergeQueue:
 
         return req
 
+    def cancel(self, task_id: str) -> bool:
+        """Cancel a pending merge request."""
+        # Remove from in-memory queue
+        self._queue = [r for r in self._queue if r.task_id != task_id]
+        
+        # Update DB
+        row = self.bus._conn.execute(
+            "SELECT status FROM merge_queue WHERE task_id=?", (task_id,)
+        ).fetchone()
+        if not row:
+            return False
+        if row["status"] not in ("pending", "dry_run"):
+            return False  # Can't cancel merged/conflict/failed
+        
+        self.bus._conn.execute(
+            "UPDATE merge_queue SET status='cancelled' WHERE task_id=?", (task_id,)
+        )
+        self.bus._conn.commit()
+        logger.info(f"Cancelled merge: {task_id[:8]}")
+        return True
+
+    def retry(self, task_id: str) -> bool:
+        """Retry a failed or conflicted merge request."""
+        row = self.bus._conn.execute(
+            "SELECT status FROM merge_queue WHERE task_id=?", (task_id,)
+        ).fetchone()
+        if not row:
+            return False
+        if row["status"] not in ("conflict", "failed"):
+            return False
+        
+        self.bus._conn.execute(
+            "UPDATE merge_queue SET status='pending', error_log=NULL WHERE task_id=?", (task_id,)
+        )
+        self.bus._conn.commit()
+        
+        # Reload queue
+        self._load_from_db()
+        logger.info(f"Retried merge: {task_id[:8]}")
+        return True
+
+    def list_all(self) -> list[dict]:
+        """List all merge requests (any status)."""
+        rows = self.bus._conn.execute(
+            "SELECT * FROM merge_queue ORDER BY priority DESC, created_at ASC"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def list_pending(self) -> list[dict]:
+        """List all pending merge requests."""
+        rows = self.bus._conn.execute(
+            "SELECT * FROM merge_queue WHERE status='pending' ORDER BY priority DESC, created_at ASC"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_status(self, task_id: str) -> Optional[dict]:
+        """Get merge status for a task."""
+        row = self.bus._conn.execute(
+            "SELECT * FROM merge_queue WHERE task_id=?", (task_id,)
+        ).fetchone()
+        if not row:
+            return None
+        return dict(row)
+
+    def _cleanup_after_merge(self, req: MergeRequest):
+        """Cleanup worktree and update task status after successful merge."""
+        # Remove worktree
+        wt_path = req.worktree_path
+        if os.path.exists(wt_path):
+            try:
+                shutil.rmtree(wt_path, ignore_errors=True)
+            except:
+                pass
+        
+        # Update task status in FsProtocol if available
+        if self._fs:
+            try:
+                task = self._fs._read_task(self._fs._path("active", req.task_id))
+                if not task:
+                    task = self._fs._read_task(self._fs._path("done", req.task_id))
+                if task:
+                    task.status = "done"
+                    task.result = {**task.result, "merged": True, "branch": req.branch}
+                    self._fs._write_task("done", task)
+            except Exception as e:
+                logger.error(f"Failed to update task status: {e}")
+
     def _resolve_conflict(self, req: MergeRequest, error: str) -> bool:
         """Resolve conflict based on severity level.
 
         Levels:
         0 = auto-resolved (handled by dry-run)
-        1 = simple (few files) → AI resolution
+        1 = simple (few files) → Tier 1: rebase/cherry-pick
         2 = moderate (multiple files) → AI resolution
         3 = complex (many files) → human escalation
         """
         if req.conflict_level == 0:
             return True  # Already resolved
 
+        # Tier 1: Simple conflict — try rebase
+        if req.conflict_level == 1:
+            logger.info(f"Tier 1 resolution (rebase): {req.task_id[:8]}")
+            if self._try_rebase(req):
+                return True
+
+        # Tier 2: Moderate — AI resolution
         if req.conflict_level <= 2 and self.ai_resolver:
-            # Try AI-assisted resolution
             logger.info(f"Attempting AI resolution (level {req.conflict_level}): {req.task_id[:8]}")
             try:
                 req.status = "resolving"
@@ -341,6 +441,50 @@ class MergeQueue:
         # Level 3 or AI failed → escalate to human
         logger.warning(f"Escalating to human: {req.task_id[:8]} (level {req.conflict_level})")
         return False
+
+    def _try_rebase(self, req: MergeRequest) -> bool:
+        """Try to rebase the worktree branch onto base (Tier 1 resolution)."""
+        try:
+            # Fetch latest base
+            subprocess.run(
+                ["git", "fetch", "origin", self.base_branch],
+                cwd=self.repo, capture_output=True, text=True,
+            )
+            
+            # Attempt rebase
+            result = subprocess.run(
+                ["git", "rebase", f"origin/{self.base_branch}", req.branch],
+                cwd=self.repo, capture_output=True, text=True,
+            )
+            
+            if result.returncode == 0:
+                # Rebase succeeded — now merge
+                subprocess.run(
+                    ["git", "checkout", self.base_branch],
+                    cwd=self.repo, check=True, capture_output=True, text=True,
+                )
+                result = subprocess.run(
+                    ["git", "merge", "--no-ff", req.branch],
+                    cwd=self.repo, capture_output=True, text=True,
+                )
+                if result.returncode == 0:
+                    logger.info(f"Rebase + merge succeeded: {req.task_id[:8]}")
+                    return True
+            
+            # Rebase failed — abort
+            subprocess.run(
+                ["git", "rebase", "--abort"],
+                cwd=self.repo, capture_output=True,
+            )
+            return False
+            
+        except Exception as e:
+            logger.error(f"Rebase failed: {e}")
+            subprocess.run(
+                ["git", "rebase", "--abort"],
+                cwd=self.repo, capture_output=True,
+            )
+            return False
 
     def _dry_run_merge(self, req: MergeRequest) -> tuple[bool, Optional[str]]:
         """Attempt to merge the worktree branch into base.
@@ -419,16 +563,17 @@ class MergeQueue:
         ).fetchall()
 
         for row in rows:
+            r = dict(row)  # Convert to dict for .get()
             self._queue.append(MergeRequest(
-                task_id=row["task_id"],
-                branch=row["branch"],
-                worktree_path=row["worktree"],
-                agent_id=row["agent_id"],
-                priority=row["priority"],
-                status=row["status"],
-                conflict_level=row.get("conflict_level", 0),
-                error=row.get("error_log"),
-                created_at=row["created_at"],
+                task_id=r["task_id"],
+                branch=r["branch"],
+                worktree_path=r["worktree"],
+                agent_id=r["agent_id"],
+                priority=r["priority"],
+                status=r["status"],
+                conflict_level=r.get("conflict_level", 0),
+                error=r.get("error_log"),
+                created_at=r["created_at"],
             ))
 
     def _update_db(self, req: MergeRequest):
@@ -445,22 +590,6 @@ class MergeQueue:
                 (req.task_id,),
             )
         self.bus._conn.commit()
-
-    def get_status(self, task_id: str) -> Optional[dict]:
-        """Get merge status for a task."""
-        row = self.bus._conn.execute(
-            "SELECT * FROM merge_queue WHERE task_id=?", (task_id,)
-        ).fetchone()
-        if not row:
-            return None
-        return dict(row)
-
-    def list_pending(self) -> list[dict]:
-        """List all pending merge requests."""
-        rows = self.bus._conn.execute(
-            "SELECT * FROM merge_queue WHERE status='pending' ORDER BY priority DESC, created_at ASC"
-        ).fetchall()
-        return [dict(r) for r in rows]
 
     def close(self):
         self.bus.close()

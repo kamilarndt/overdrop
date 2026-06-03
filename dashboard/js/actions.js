@@ -59,6 +59,27 @@ async function triggerMerge(id) {
   else { fetchMergeQueue(); renderTasks(allTasks); }
 }
 
+// === MERGE QUEUE ACTIONS ===
+
+async function processMerge(taskId) {
+  const r = await api('POST', `/api/merge-queue/${taskId}/process`);
+  if (r.error) alert(r.error);
+  else { fetchMergeQueue(); renderTasks(allTasks); }
+}
+
+async function cancelMerge(taskId) {
+  if (!confirm('Cancel this merge request?')) return;
+  const r = await api('POST', `/api/merge-queue/${taskId}/cancel`);
+  if (r.error) alert(r.error);
+  else { fetchMergeQueue(); renderTasks(allTasks); }
+}
+
+async function retryMerge(taskId) {
+  const r = await api('POST', `/api/merge-queue/${taskId}/retry`);
+  if (r.error) alert(r.error);
+  else { fetchMergeQueue(); renderTasks(allTasks); }
+}
+
 async function changeAgentModel(agentName, modelId) {
   try {
     const res = await fetch(`/api/agents/${agentName}/model`, {

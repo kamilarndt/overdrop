@@ -461,6 +461,91 @@ def api_trigger_merge(handler, task_id):
         _json_response(handler, {"error": str(e)}, 500)
 
 
+def api_process_merge(handler, task_id):
+    """POST /api/merge-queue/:id/process — process a pending merge."""
+    try:
+        db_path = os.path.join(str(_ws), "overdrop.db")
+        import sqlite3
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        
+        row = conn.execute("SELECT * FROM merge_queue WHERE task_id=?", (task_id,)).fetchone()
+        if not row:
+            conn.close()
+            _json_response(handler, {"error": "Not in queue"}, 404)
+            return
+        
+        if row["status"] != "pending":
+            conn.close()
+            _json_response(handler, {"error": f"Cannot process: status is {row['status']}"}, 409)
+            return
+        
+        # Update status to processing
+        conn.execute("UPDATE merge_queue SET status='dry_run' WHERE task_id=?", (task_id,))
+        conn.commit()
+        conn.close()
+        
+        _json_response(handler, {"ok": True, "task_id": task_id, "status": "dry_run"})
+    except Exception as e:
+        _json_response(handler, {"error": str(e)}, 500)
+
+
+def api_cancel_merge(handler, task_id):
+    """POST /api/merge-queue/:id/cancel — cancel a merge request."""
+    try:
+        db_path = os.path.join(str(_ws), "overdrop.db")
+        import sqlite3
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        
+        row = conn.execute("SELECT * FROM merge_queue WHERE task_id=?", (task_id,)).fetchone()
+        if not row:
+            conn.close()
+            _json_response(handler, {"error": "Not in queue"}, 404)
+            return
+        
+        if row["status"] not in ("pending", "dry_run"):
+            conn.close()
+            _json_response(handler, {"error": f"Cannot cancel: status is {row['status']}"}, 409)
+            return
+        
+        conn.execute("UPDATE merge_queue SET status='cancelled' WHERE task_id=?", (task_id,))
+        conn.commit()
+        conn.close()
+        
+        _json_response(handler, {"ok": True, "task_id": task_id})
+    except Exception as e:
+        _json_response(handler, {"error": str(e)}, 500)
+
+
+def api_retry_merge(handler, task_id):
+    """POST /api/merge-queue/:id/retry — retry a failed merge."""
+    try:
+        db_path = os.path.join(str(_ws), "overdrop.db")
+        import sqlite3
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        
+        row = conn.execute("SELECT * FROM merge_queue WHERE task_id=?", (task_id,)).fetchone()
+        if not row:
+            conn.close()
+            _json_response(handler, {"error": "Not in queue"}, 404)
+            return
+        
+        if row["status"] not in ("conflict", "failed"):
+            conn.close()
+            _json_response(handler, {"error": f"Cannot retry: status is {row['status']}"}, 409)
+            return
+        
+        conn.execute("UPDATE merge_queue SET status='pending', error_log=NULL WHERE task_id=?", (task_id,))
+        conn.commit()
+        conn.close()
+        
+        _json_response(handler, {"ok": True, "task_id": task_id})
+    except Exception as e:
+        _json_response(handler, {"error": str(e)}, 500)
+
+
 # ---- HTTP HANDLER ----
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -502,6 +587,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif p.startswith("/api/merge-queue/") and p.endswith("/trigger"):
             task_id = p.split("/")[3]
             api_trigger_merge(self, task_id)
+        elif p.startswith("/api/merge-queue/") and p.endswith("/process"):
+            task_id = p.split("/")[3]
+            api_process_merge(self, task_id)
+        elif p.startswith("/api/merge-queue/") and p.endswith("/cancel"):
+            task_id = p.split("/")[3]
+            api_cancel_merge(self, task_id)
+        elif p.startswith("/api/merge-queue/") and p.endswith("/retry"):
+            task_id = p.split("/")[3]
+            api_retry_merge(self, task_id)
         else:
             self.send_error(404)
 
@@ -530,6 +624,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif p.startswith("/api/agents/") and p.endswith("/model"):
             agent_name = p.split("/")[3]
             api_update_agent_model(self, body, agent_name)
+        elif p.startswith("/api/merge-queue/") and p.endswith("/trigger"):
+            task_id = p.split("/")[3]
+            api_trigger_merge(self, task_id)
+        elif p.startswith("/api/merge-queue/") and p.endswith("/process"):
+            task_id = p.split("/")[3]
+            api_process_merge(self, task_id)
+        elif p.startswith("/api/merge-queue/") and p.endswith("/cancel"):
+            task_id = p.split("/")[3]
+            api_cancel_merge(self, task_id)
+        elif p.startswith("/api/merge-queue/") and p.endswith("/retry"):
+            task_id = p.split("/")[3]
+            api_retry_merge(self, task_id)
         else:
             self.send_error(404)
 

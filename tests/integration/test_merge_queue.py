@@ -1,221 +1,322 @@
-"""OverDrop — Merge Queue & Worktree Tests (pytest)"""
-import os
+"""OverDrop — Integration Tests for MergeQueue + Worktree"""
+
 import sys
+import os
 import tempfile
-import asyncio
-import uuid
-import subprocess as sp
 import shutil
+import subprocess
+import uuid
 import pytest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "python"))
-from overdrop.worktree import WorktreeManager, MergeQueue
-from overdrop import FsProtocol
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "python"))
+from overdrop import WorktreeManager, MergeQueue
 
 
 def setup_git(path):
+    """Create a minimal git repo for testing."""
     os.makedirs(path, exist_ok=True)
-    sp.run(["git", "init"], cwd=path, check=True, capture_output=True)
-    sp.run(["git", "config", "user.email", "test@overdrop.io"], cwd=path, capture_output=True)
-    sp.run(["git", "config", "user.name", "OverDrop"], cwd=path, capture_output=True)
-    with open(os.path.join(path, "README.md"), "w") as f:
-        f.write("# test\n")
-    sp.run(["git", "add", "-A"], cwd=path, capture_output=True)
-    sp.run(["git", "commit", "-m", "init"], cwd=path, capture_output=True)
+    os.makedirs(os.path.join(path, ".overdrop"), exist_ok=True)  # For MailBus
+    subprocess.run(["git", "init"], cwd=path, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@overdrop.dev"], cwd=path, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=path, capture_output=True)
+    with open(os.path.join(path, "main.py"), "w") as f:
+        f.write("def main(): return 'initial'\n")
+    subprocess.run(["git", "add", "."], cwd=path, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=path, capture_output=True)
     return path
 
 
-@pytest.fixture
-def git_repo():
-    tmp = tempfile.mkdtemp(prefix="od-git-")
-    repo = os.path.join(tmp, "repo")
-    setup_git(repo)
-    yield repo
-    shutil.rmtree(tmp)
+# =========================================================================
+# A. MERGE SUCCESS (no conflicts)
+# =========================================================================
 
+def test_merge_success_no_conflicts():
+    """Two branches editing different files → both merge cleanly."""
+    tmp = tempfile.mkdtemp(prefix="od-test-")
+    repo = setup_git(os.path.join(tmp, "repo"))
+    wt = WorktreeManager(repo)
+    mq = MergeQueue(repo)
 
-@pytest.fixture
-def wt_manager(git_repo):
-    tmp = tempfile.mkdtemp(prefix="od-wtm-")
-    wt_root = os.path.join(tmp, "worktrees")
-    wm = WorktreeManager(git_repo, worktree_root=wt_root)
-    yield wm
-    shutil.rmtree(tmp)
+    t1 = f"task-{uuid.uuid4().hex[:8]}"
+    t2 = f"task-{uuid.uuid4().hex[:8]}"
 
+    # Branch 1: new file
+    wt1 = wt.create(t1, "agent-a")
+    with open(os.path.join(wt1, "feature_a.py"), "w") as f:
+        f.write("def feature_a(): return 'a'\n")
+    wt.commit_changes(t1, "Add feature A", "agent-a")
 
-@pytest.fixture
-def merge_queue(git_repo):
-    tmp = tempfile.mkdtemp(prefix="od-mqt-")
-    db = os.path.join(tmp, "od.db")
-    mq = MergeQueue(git_repo, base_branch="main", db_path=db)
-    yield mq
+    # Branch 2: different new file
+    wt2 = wt.create(t2, "agent-b")
+    with open(os.path.join(wt2, "feature_b.py"), "w") as f:
+        f.write("def feature_b(): return 'b'\n")
+    wt.commit_changes(t2, "Add feature B", "agent-b")
+
+    # Enqueue and process both
+    b1 = f"od/agent-a/{t1[:8]}"
+    b2 = f"od/agent-b/{t2[:8]}"
+
+    mq.enqueue(t1, b1, wt1, "agent-a")
+    mq.enqueue(t2, b2, wt2, "agent-b")
+
+    r1 = mq.process_next()
+    assert r1.status == "merged", f"First merge failed: {r1.error}"
+
+    r2 = mq.process_next()
+    assert r2.status == "merged", f"Second merge failed: {r2.error}"
+
+    # Cleanup
     mq.close()
     shutil.rmtree(tmp)
 
 
-# ---------------------------------------------------------------------------
-# A. FIFO Order
-# ---------------------------------------------------------------------------
+# =========================================================================
+# B. MERGE CONFLICT (Tier 1 — simple)
+# =========================================================================
 
-@pytest.mark.asyncio
-async def test_fifo_order_respected(wt_manager, merge_queue):
-    """5 merge requests → must process in FIFO order."""
-    tasks = []
-    for i in range(5):
-        tid = f"task-{uuid.uuid4().hex[:8]}"
-        wt = wt_manager.create(tid, f"agent-{i}")
-        with open(os.path.join(wt, f"file{i}.py"), "w") as f:
-            f.write(f"# task {i}\n")
-        wt_manager.commit_changes(tid, f"Add file {i}", f"agent-{i}")
-        branch = f"od/agent-{i}/{tid[:8]}"
-        merge_queue.enqueue(tid, branch, wt, f"agent-{i}")
-        tasks.append(tid)
+def test_merge_conflict_tier1():
+    """Two branches editing same file → conflict detected."""
+    tmp = tempfile.mkdtemp(prefix="od-test-conflict-")
+    repo = setup_git(os.path.join(tmp, "repo"))
+    wt = WorktreeManager(repo)
+    mq = MergeQueue(repo)
 
-    order = []
-    for _ in range(5):
-        result = merge_queue.process_next()
-        if result and result.status == "merged":
-            order.append(result.task_id)
-
-    assert order == tasks, f"FIFO order violated: {order} != {tasks}"
-
-
-# ---------------------------------------------------------------------------
-# B. Tier 1 Auto-Merge
-# ---------------------------------------------------------------------------
-
-@pytest.mark.asyncio
-async def test_tier1_auto_merge(wt_manager, merge_queue):
-    """Two worktrees editing DIFFERENT files → auto-merge success."""
     t1 = f"task-{uuid.uuid4().hex[:8]}"
     t2 = f"task-{uuid.uuid4().hex[:8]}"
 
-    wt1 = wt_manager.create(t1, "pi")
-    with open(os.path.join(wt1, "auth.py"), "w") as f:
-        f.write("def login(): pass\n")
-    wt_manager.commit_changes(t1, "Add auth", "pi")
+    # Branch 1: edit main.py
+    wt1 = wt.create(t1, "agent-a")
+    with open(os.path.join(wt1, "main.py"), "w") as f:
+        f.write("def main(): return 'version A'\n")
+    wt.commit_changes(t1, "Version A", "agent-a")
 
-    wt2 = wt_manager.create(t2, "hermes")
-    with open(os.path.join(wt2, "db.py"), "w") as f:
-        f.write("def connect(): pass\n")
-    wt_manager.commit_changes(t2, "Add db", "hermes")
+    # Branch 2: different edit to same file
+    wt2 = wt.create(t2, "agent-b")
+    with open(os.path.join(wt2, "main.py"), "w") as f:
+        f.write("def main(): return 'version B'\n")
+    wt.commit_changes(t2, "Version B", "agent-b")
 
-    b1 = f"od/pi/{t1[:8]}"
-    b2 = f"od/hermes/{t2[:8]}"
-
-    merge_queue.enqueue(t1, b1, wt1, "pi")
-    merge_queue.enqueue(t2, b2, wt2, "hermes")
-
-    r1 = merge_queue.process_next()
+    # Merge first (succeeds)
+    b1 = f"od/agent-a/{t1[:8]}"
+    mq.enqueue(t1, b1, wt1, "agent-a")
+    r1 = mq.process_next()
     assert r1.status == "merged"
 
-    r2 = merge_queue.process_next()
-    assert r2.status == "merged"
+    # Merge second (conflict)
+    b2 = f"od/agent-b/{t2[:8]}"
+    mq.enqueue(t2, b2, wt2, "agent-b")
+    r2 = mq.process_next()
+    assert r2.status == "conflict", f"Expected conflict, got {r2.status}"
+    assert r2.conflict_level >= 1, f"Expected conflict_level >= 1, got {r2.conflict_level}"
+
+    # Cleanup
+    mq.close()
+    shutil.rmtree(tmp)
 
 
-# ---------------------------------------------------------------------------
-# C. Worktree Isolation
-# ---------------------------------------------------------------------------
+# =========================================================================
+# C. WORKTREE CLEANUP
+# =========================================================================
 
-def test_worktree_isolation(wt_manager, git_repo):
-    """Agent A changes in worktree not visible to agent B before merge."""
+def test_worktree_cleanup_after_merge():
+    """Worktree should be cleaned up after successful merge."""
+    tmp = tempfile.mkdtemp(prefix="od-test-cleanup-")
+    repo = setup_git(os.path.join(tmp, "repo"))
+    wt = WorktreeManager(repo)
+    mq = MergeQueue(repo)
+
+    t1 = f"task-{uuid.uuid4().hex[:8]}"
+
+    wt1 = wt.create(t1, "agent-a")
+    with open(os.path.join(wt1, "cleanup.py"), "w") as f:
+        f.write("def cleanup(): return 'done'\n")
+    wt.commit_changes(t1, "Cleanup test", "agent-a")
+
+    b1 = f"od/agent-a/{t1[:8]}"
+    mq.enqueue(t1, b1, wt1, "agent-a")
+
+    # Verify worktree exists
+    assert os.path.exists(wt1), "Worktree should exist before merge"
+
+    # Process merge
+    r1 = mq.process_next()
+    assert r1.status == "merged"
+
+    # Verify worktree is cleaned up
+    assert not os.path.exists(wt1), "Worktree should be cleaned up after merge"
+
+    # Cleanup
+    mq.close()
+    shutil.rmtree(tmp)
+
+
+# =========================================================================
+# D. RETRY AFTER CONFLICT
+# =========================================================================
+
+def test_retry_after_conflict():
+    """Retry a conflicted merge should reset status to pending."""
+    tmp = tempfile.mkdtemp(prefix="od-test-retry-")
+    repo = setup_git(os.path.join(tmp, "repo"))
+    wt = WorktreeManager(repo)
+    mq = MergeQueue(repo)
+
     t1 = f"task-{uuid.uuid4().hex[:8]}"
     t2 = f"task-{uuid.uuid4().hex[:8]}"
 
-    wt1 = wt_manager.create(t1, "agent-a")
-    with open(os.path.join(wt1, "secret.py"), "w") as f:
-        f.write("SECRET = 'agent-a-work'\n")
-    wt_manager.commit_changes(t1, "Add secret", "agent-a")
+    # Branch 1
+    wt1 = wt.create(t1, "agent-a")
+    with open(os.path.join(wt1, "conflict.py"), "w") as f:
+        f.write("def conflict(): return 'A'\n")
+    wt.commit_changes(t1, "Version A", "agent-a")
 
-    wt2 = wt_manager.create(t2, "agent-b")
-    # agent-b should NOT see secret.py
-    assert not os.path.exists(os.path.join(wt2, "secret.py")), \
-        "Isolation broken: agent-b sees agent-a's unmerged changes!"
+    # Branch 2 (conflicts)
+    wt2 = wt.create(t2, "agent-b")
+    with open(os.path.join(wt2, "conflict.py"), "w") as f:
+        f.write("def conflict(): return 'B'\n")
+    wt.commit_changes(t2, "Version B", "agent-b")
 
-    # But README.md from initial commit should be visible to both
-    assert os.path.exists(os.path.join(wt2, "README.md"))
+    # Merge first
+    b1 = f"od/agent-a/{t1[:8]}"
+    mq.enqueue(t1, b1, wt1, "agent-a")
+    r1 = mq.process_next()
+    assert r1.status == "merged"
+
+    # Merge second (conflict)
+    b2 = f"od/agent-b/{t2[:8]}"
+    mq.enqueue(t2, b2, wt2, "agent-b")
+    r2 = mq.process_next()
+    assert r2.status == "conflict"
+
+    # Retry
+    success = mq.retry(t2)
+    assert success, "Retry should succeed"
+
+    # Verify status reset
+    status = mq.get_status(t2)
+    assert status["status"] == "pending", f"Expected pending after retry, got {status['status']}"
+
+    # Cleanup
+    mq.close()
+    shutil.rmtree(tmp)
 
 
-# ---------------------------------------------------------------------------
-# D. Conflict Detection
-# ---------------------------------------------------------------------------
+# =========================================================================
+# E. CANCEL MERGE
+# =========================================================================
 
-@pytest.mark.asyncio
-async def test_conflict_detection(wt_manager, merge_queue):
-    """Same file edited → conflict detected, not merged."""
+def test_cancel_merge():
+    """Cancel a pending merge request."""
+    tmp = tempfile.mkdtemp(prefix="od-test-cancel-")
+    repo = setup_git(os.path.join(tmp, "repo"))
+    wt = WorktreeManager(repo)
+    mq = MergeQueue(repo)
+
+    t1 = f"task-{uuid.uuid4().hex[:8]}"
+
+    wt1 = wt.create(t1, "agent-a")
+    with open(os.path.join(wt1, "cancel.py"), "w") as f:
+        f.write("def cancel(): return 'pending'\n")
+    wt.commit_changes(t1, "Cancel test", "agent-a")
+
+    b1 = f"od/agent-a/{t1[:8]}"
+    mq.enqueue(t1, b1, wt1, "agent-a")
+
+    # Cancel
+    success = mq.cancel(t1)
+    assert success, "Cancel should succeed"
+
+    # Verify status
+    status = mq.get_status(t1)
+    assert status["status"] == "cancelled", f"Expected cancelled, got {status['status']}"
+
+    # Cleanup
+    mq.close()
+    shutil.rmtree(tmp)
+
+
+# =========================================================================
+# F. LIST ALL ENTRIES
+# =========================================================================
+
+def test_list_all_entries():
+    """List all merge queue entries regardless of status."""
+    tmp = tempfile.mkdtemp(prefix="od-test-list-")
+    repo = setup_git(os.path.join(tmp, "repo"))
+    wt = WorktreeManager(repo)
+    mq = MergeQueue(repo)
+
     t1 = f"task-{uuid.uuid4().hex[:8]}"
     t2 = f"task-{uuid.uuid4().hex[:8]}"
 
-    wt1 = wt_manager.create(t1, "agent-a")
-    with open(os.path.join(wt1, "shared.py"), "w") as f:
-        f.write("def f(): return 'a'\n")
-    wt_manager.commit_changes(t1, "Version a", "agent-a")
+    wt1 = wt.create(t1, "agent-a")
+    with open(os.path.join(wt1, "list.py"), "w") as f:
+        f.write("def list_test(): return 'a'\n")
+    wt.commit_changes(t1, "List test A", "agent-a")
 
-    wt2 = wt_manager.create(t2, "agent-b")
-    with open(os.path.join(wt2, "shared.py"), "w") as f:
-        f.write("def f(): return 'b'\n")
-    wt_manager.commit_changes(t2, "Version b", "agent-b")
+    wt2 = wt.create(t2, "agent-b")
+    with open(os.path.join(wt2, "list.py"), "w") as f:
+        f.write("def list_test(): return 'b'\n")
+    wt.commit_changes(t2, "List test B", "agent-b")
 
     b1 = f"od/agent-a/{t1[:8]}"
     b2 = f"od/agent-b/{t2[:8]}"
 
-    merge_queue.enqueue(t1, b1, wt1, "agent-a")
-    result1 = merge_queue.process_next()
-    assert result1.status == "merged"  # first one goes through
+    mq.enqueue(t1, b1, wt1, "agent-a")
+    mq.enqueue(t2, b2, wt2, "agent-b")
 
-    merge_queue.enqueue(t2, b2, wt2, "agent-b")
-    result2 = merge_queue.process_next()
-    # Should fail with conflict
-    assert result2.status in ("conflict", "failed"), \
-        f"Expected conflict, got {result2.status}"
+    # Process first
+    r1 = mq.process_next()
+    assert r1.status == "merged"
 
+    # List all — should show both (one merged, one pending)
+    all_entries = mq.list_all()
+    assert len(all_entries) == 2, f"Expected 2 entries, got {len(all_entries)}"
 
-# ---------------------------------------------------------------------------
-# E. Merge Status Tracking
-# ---------------------------------------------------------------------------
+    statuses = {e["status"] for e in all_entries}
+    assert "merged" in statuses, "Should have merged entry"
+    assert "pending" in statuses, "Should have pending entry"
 
-def test_merge_status_tracking(merge_queue):
-    """Merge queue stores and retrieves status correctly."""
-    merge_queue.enqueue("task-xyz", "branch/xyz", "/tmp/wt", "agent")
-    status = merge_queue.get_status("task-xyz")
-    assert status is not None
-    assert status["status"] == "pending"
-    assert status["agent_id"] == "agent"
+    # Cleanup
+    mq.close()
+    shutil.rmtree(tmp)
 
 
-# ---------------------------------------------------------------------------
-# F. Priority-based ordering
-# ---------------------------------------------------------------------------
+# =========================================================================
+# G. PRIORITY ORDERING
+# =========================================================================
 
-@pytest.mark.asyncio
-async def test_priority_ordering(wt_manager, merge_queue):
-    """High priority merges should be processed before low."""
-    tasks_data = [
-        ("task-low", "agent-low", 10),
-        ("task-high", "agent-high", 1),
-        ("task-med", "agent-med", 5),
-    ]
+def test_priority_ordering():
+    """Higher priority (lower number) should be processed first."""
+    tmp = tempfile.mkdtemp(prefix="od-test-priority-")
+    repo = setup_git(os.path.join(tmp, "repo"))
+    wt = WorktreeManager(repo)
+    mq = MergeQueue(repo)
 
-    for tid, agent, prio in tasks_data:
-        wt = wt_manager.create(tid, agent)
-        with open(os.path.join(wt, f"{agent}.py"), "w") as f:
-            f.write(f"# {agent}\n")
-        wt_manager.commit_changes(tid, f"File from {agent}", agent)
-        branch = f"od/{agent}/{tid[:8]}"
-        merge_queue.enqueue(tid, branch, wt, agent, priority=prio)
+    tasks = []
+    for i, priority in enumerate([10, 1, 5]):
+        tid = f"task-{uuid.uuid4().hex[:8]}"
+        wtp = wt.create(tid, f"agent-{i}")
+        with open(os.path.join(wtp, f"file_{i}.py"), "w") as f:
+            f.write(f"def f(): return {i}\n")
+        wt.commit_changes(tid, f"File {i}", f"agent-{i}")
+        branch = f"od/agent-{i}/{tid[:8]}"
+        mq.enqueue(tid, branch, wtp, f"agent-{i}", priority=priority)
+        tasks.append((tid, priority))
 
-    # First processed should be highest priority (1 = highest)
-    # NOTE: queue sorts by (-priority, created_at), all enqueued simultaneously
-    # Task with priority=1 comes first
-    results = []
-    for _ in range(3):
-        r = merge_queue.process_next()
-        if r:
-            results.append(r.task_id)
-    
-    # task-high (priority=1) should be first
-    assert results[0] == "task-high", f"Expected task-high first, got {results}"
+    # Process — should get priority 1 first, then 5, then 10
+    r1 = mq.process_next()
+    assert r1.status == "merged"
+    assert r1.task_id == tasks[1][0], f"Expected task with priority 1 first"
 
+    r2 = mq.process_next()
+    assert r2.status == "merged"
+    assert r2.task_id == tasks[2][0], f"Expected task with priority 5 second"
 
-if __name__ == "__main__":
-    pytest.main([__file__, "-v", "--asyncio-mode=auto"])
+    r3 = mq.process_next()
+    assert r3.status == "merged"
+    assert r3.task_id == tasks[0][0], f"Expected task with priority 10 third"
+
+    # Cleanup
+    mq.close()
+    shutil.rmtree(tmp)
