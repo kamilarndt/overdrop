@@ -1,0 +1,477 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OverDrop Dashboard</title>
+<style>
+:root{--bg:#0a0e14;--s:#131a24;--s2:#192230;--b:#253040;--t:#c5ccd6;
+--m:#6c7685;--g:#30c85a;--gb:#30c85a18;--y:#e5a72e;--yb:#e5a72e18;
+--r:#e54b4b;--rb:#e54b4b18;--blu:#58a6ff;--blub:#58a6ff18;--p:#a371f7;
+--pb:#a371f718;--rad:8px;--mon:'JetBrains Mono','Fira Code',monospace}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:system-ui,sans-serif;background:var(--bg);color:var(--t);min-height:100vh}
+.hd{background:var(--s);border-bottom:1px solid var(--b);padding:10px 24px;display:flex;
+align-items:center;justify-content:space-between;position:sticky;top:0;z-index:10}
+.hd-l{display:flex;align-items:center;gap:10px}
+.logo{font-size:19px;font-weight:700}.logo span{color:var(--blu)}
+.ver{font-size:10px;color:var(--m);background:var(--s2);padding:2px 8px;border-radius:12px}
+.hd-r{display:flex;align-items:center;gap:18px;font-size:12px}
+.run{color:var(--m)}.run strong{color:var(--t)}
+.dot{width:8px;height:8px;border-radius:50%;display:inline-block}
+.gn{background:var(--g);box-shadow:0 0 6px var(--g)}.rd{background:var(--r)}
+.con{display:flex;align-items:center;gap:6px;font-size:11px}
+.ct{padding:20px;max-width:1400px;margin:0 auto}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;margin-bottom:20px}
+.sc{background:var(--s);border:1px solid var(--b);border-radius:var(--rad);padding:14px 18px;transition:transform .15s}
+.sc:hover{transform:translateY(-2px)}
+.sc .lbl{font-size:10px;text-transform:uppercase;color:var(--m);letter-spacing:.5px;margin-bottom:3px}
+.sc .val{font-size:32px;font-weight:700}
+.sc .sub{font-size:11px;color:var(--m);margin-top:2px}
+.sc.in{border-left:3px solid var(--y)}.sc.in .val{color:var(--y)}
+.sc.ac{border-left:3px solid var(--blu)}.sc.ac .val{color:var(--blu)}
+.sc.dn{border-left:3px solid var(--g)}.sc.dn .val{color:var(--g)}
+.sc.fl{border-left:3px solid var(--r)}.sc.fl .val{color:var(--r)}
+.sc.at{border-left:3px solid var(--p)}.sc.at .val{color:var(--p)}
+.ag{background:var(--s);border:1px solid var(--b);border-radius:var(--rad);padding:14px 18px;margin-bottom:20px}
+.ag h3{font-size:12px;color:var(--m);text-transform:uppercase;margin-bottom:10px;letter-spacing:.5px}
+.alist{display:flex;gap:12px;flex-wrap:wrap}
+.ai{display:flex;align-items:center;gap:7px;padding:6px 12px;background:var(--s2);border-radius:var(--rad);font-size:12px}
+.ai .si{font-size:9px}.ai .nm{font-family:var(--mon);font-size:11px;color:var(--t)}
+.ai .st{font-size:10px;color:var(--m)}.ai .el{font-size:9px;color:var(--m);margin-left:auto}
+.ai.th{border:1px solid var(--blu)}.ai.th .si{color:var(--blu)}
+.ai.id .si{color:var(--m)}.ai.to .si{color:var(--y)}.ai.of .si{color:var(--r)}
+.sec{margin-bottom:20px}.sec h3{font-size:12px;color:var(--m);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px}
+.tw{background:var(--s);border:1px solid var(--b);border-radius:var(--rad);overflow-x:auto}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th{padding:8px 12px;text-align:left;color:var(--m);font-size:10px;text-transform:uppercase;letter-spacing:.5px;border-bottom:1px solid var(--b);background:var(--s2)}
+td{padding:7px 12px;border-bottom:1px solid var(--b);font-family:var(--mon);font-size:11px}
+tr:last-child td{border-bottom:none}tr:hover td{background:var(--s2)}
+.bdg{display:inline-block;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:600;font-family:system-ui}
+.bdg.in{background:var(--yb);color:var(--y)}.bdg.ac{background:var(--blub);color:var(--blu)}
+.bdg.dn{background:var(--gb);color:var(--g)}.bdg.fl{background:var(--rb);color:var(--r)}
+.bdg.bl{background:var(--pb);color:var(--p)}.bdg.cl{background:var(--blub);color:var(--blu)}
+.bdg.fb{background:#f0e6ff;color:#7c3aed}
+.em{padding:30px;text-align:center;color:var(--m)}.em .ic{font-size:24px;margin-bottom:8px}
+.le{padding:6px 12px;border-bottom:1px solid var(--b);display:flex;gap:10px;font-size:11px;align-items:center}
+.le:last-child{border-bottom:none}
+.lt{color:var(--m);font-family:var(--mon);min-width:60px}
+.la{color:var(--blu);font-family:var(--mon);min-width:90px}
+.ly{padding:1px 6px;border-radius:8px;font-size:9px;font-weight:600;text-transform:uppercase}
+.ly.di{background:var(--yb);color:var(--y)}.ly.wd{background:var(--gb);color:var(--g)}
+.ly.es{background:var(--rb);color:var(--r)}.ly.br{background:var(--blub);color:var(--blu)}
+.ly.tl{background:var(--pb);color:var(--p)}
+.lm{color:var(--t);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* NEW: Task creation form */
+.form-row{display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap}
+.form-row input,.form-row select{background:var(--s);border:1px solid var(--b);color:var(--t);
+padding:8px 12px;border-radius:var(--rad);font-size:12px;font-family:var(--mon)}
+.form-row input:focus,.form-row select:focus{outline:none;border-color:var(--blu)}
+.form-row input[type=text]{flex:1;min-width:200px}
+.btn{padding:8px 16px;border:none;border-radius:var(--rad);cursor:pointer;font-size:12px;font-weight:600;
+transition:all .15s;font-family:system-ui}
+.btn:hover{transform:translateY(-1px)}
+.btn-primary{background:var(--blu);color:#fff}.btn-primary:hover{background:#4a94ff}
+.btn-success{background:var(--g);color:#fff}.btn-success:hover{background:#28b04e}
+.btn-danger{background:var(--r);color:#fff}.btn-danger:hover{background:#d13b3b}
+.btn-warning{background:var(--y);color:#000}.btn-warning:hover{background:#d4921e}
+.btn-secondary{background:var(--s2);color:var(--t);border:1px solid var(--b)}
+.btn-sm{padding:4px 8px;font-size:10px}
+/* NEW: Action buttons */
+.actions{display:flex;gap:4px;flex-wrap:wrap}
+/* NEW: Filter bar */
+.filter-bar{display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;align-items:center}
+.filter-bar input,.filter-bar select{background:var(--s);border:1px solid var(--b);color:var(--t);
+padding:6px 10px;border-radius:var(--rad);font-size:11px}
+.filter-bar input:focus,.filter-bar select:focus{outline:none;border-color:var(--blu)}
+.filter-label{font-size:10px;color:var(--m);text-transform:uppercase}
+/* NEW: Task detail modal */
+.modal-overlay{display:none;position:fixed;top:0;left:0;width:100%;height:100%;
+background:rgba(0,0,0,0.7);z-index:100;justify-content:center;align-items:center}
+.modal-overlay.active{display:flex}
+.modal{background:var(--s);border:1px solid var(--b);border-radius:12px;padding:24px;
+max-width:600px;width:90%;max-height:80vh;overflow-y:auto}
+.modal h2{font-size:16px;margin-bottom:16px;color:var(--t)}
+.modal .field{margin-bottom:12px}
+.modal .field label{font-size:10px;color:var(--m);text-transform:uppercase;display:block;margin-bottom:4px}
+.modal .field .val{font-size:13px;font-family:var(--mon);color:var(--t);background:var(--s2);
+padding:8px 12px;border-radius:var(--rad);word-break:break-all}
+.modal-actions{display:flex;gap:8px;margin-top:16px;justify-content:flex-end}
+/* Row click */
+tr[data-task]{cursor:pointer}
+</style>
+</head>
+<body>
+<div class="hd">
+  <div class="hd-l">
+    <div class="logo">⬡ Over<span>Drop</span></div>
+    <div class="ver">v3 — full control</div>
+  </div>
+  <div class="hd-r">
+    <div class="con"><div class="dot rd" id="wd"></div><span id="wt">Connecting</span></div>
+    <div class="run">Cycle: <strong id="ri">—</strong></div>
+  </div>
+</div>
+<div class="ct">
+  <!-- STATS -->
+  <div class="stats">
+    <div class="sc in"><div class="lbl">📥 Inbox</div><div class="val" id="si">-</div><div class="sub">Pending</div></div>
+    <div class="sc ac"><div class="lbl">🔧 Active</div><div class="val" id="sa">-</div><div class="sub">In progress</div></div>
+    <div class="sc dn"><div class="lbl">✅ Done</div><div class="val" id="sd">-</div><div class="sub">Completed</div></div>
+    <div class="sc fl"><div class="lbl">❌ Failed</div><div class="val" id="sf">-</div><div class="sub">Need review</div></div>
+    <div class="sc at"><div class="lbl">⚠️ Blocked</div><div class="val" id="sbn">-</div><div class="sub">Waiting</div></div>
+  </div>
+
+  <!-- AGENTS -->
+  <div class="ag"><h3>🔌 Agents — <span id="ac">0</span> live</h3>
+    <div id="agent-list" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:8px"></div>
+  </div>
+
+  <!-- NEW: CREATE TASK FORM -->
+  <div class="sec">
+    <h3>➕ Create Task</h3>
+    <div class="form-row">
+      <input type="text" id="new-title" placeholder="Task title...">
+      <select id="new-assignee"><option value="">Unassigned</option></select>
+      <select id="new-priority">
+        <option value="1">P1 (critical)</option><option value="3">P3 (high)</option>
+        <option value="5" selected>P5 (normal)</option><option value="7">P7 (low)</option>
+        <option value="10">P10 (backlog)</option>
+      </select>
+      <button class="btn btn-primary" onclick="createTask()">+ Submit</button>
+    </div>
+  </div>
+
+  <!-- NEW: FILTER BAR -->
+  <div class="sec">
+    <h3>📋 Tasks</h3>
+    <div class="filter-bar">
+      <span class="filter-label">Filter:</span>
+      <select id="f-status" onchange="applyFilters()">
+        <option value="">All statuses</option>
+        <option value="inbox">📥 Inbox</option>
+        <option value="active">🔧 Active</option>
+        <option value="done">✅ Done</option>
+        <option value="failed">❌ Failed</option>
+        <option value="blocked">🚫 Blocked</option>
+      </select>
+      <select id="f-agent" onchange="applyFilters()"><option value="">All agents</option></select>
+      <input type="text" id="f-search" placeholder="Search title..." oninput="applyFilters()">
+      <button class="btn btn-secondary btn-sm" onclick="resetFilters()">Clear</button>
+    </div>
+    <div class="tw"><table><thead><tr>
+      <th>ID</th><th>Title</th><th>Status</th><th>From</th><th>To</th><th>Pri</th><th>Actions</th>
+    </tr></thead><tbody id="tt"></tbody></table></div>
+  </div>
+
+  <!-- ACTIVITY LOG -->
+  <div class="sec"><h3>📨 Activity <span style="font-size:10px;color:var(--m);font-weight:400">live</span></h3>
+    <div class="tw" id="log"></div></div>
+</div>
+
+<!-- NEW: TASK DETAIL MODAL -->
+<div class="modal-overlay" id="modal" onclick="if(event.target===this)closeModal()">
+  <div class="modal">
+    <h2 id="modal-title">Task Details</h2>
+    <div class="field"><label>ID</label><div class="val" id="md-id"></div></div>
+    <div class="field"><label>Title</label><div class="val" id="md-title"></div></div>
+    <div class="field"><label>Status</label><div class="val" id="md-status"></div></div>
+    <div class="field"><label>Assignee</label><div class="val" id="md-assignee"></div></div>
+    <div class="field"><label>Priority</label><div class="val" id="md-priority"></div></div>
+    <div class="field"><label>From</label><div class="val" id="md-from"></div></div>
+    <div class="field"><label>Retries</label><div class="val" id="md-retries"></div></div>
+    <div class="field"><label>Created</label><div class="val" id="md-created"></div></div>
+    <div class="field"><label>Context</label><div class="val" id="md-context"></div></div>
+    <div class="field"><label>Result</label><div class="val" id="md-result"></div></div>
+    <div class="modal-actions" id="md-actions"></div>
+  </div>
+</div>
+
+<script>
+const s = new EventSource('/events');
+const wd = document.getElementById('wd'), wt = document.getElementById('wt');
+let allTasks = [], agents = new Map();
+
+s.addEventListener('open', () => { wd.className = 'dot gn'; wt.textContent = 'Live'; });
+s.onerror = () => { wd.className = 'dot rd'; wt.textContent = 'Retrying'; };
+
+// Agents
+let allModels = [];
+
+async function fetchModels() {
+  try {
+    const res = await fetch('/api/models');
+    allModels = await res.json();
+  } catch(e) {}
+}
+
+function updateAgents() {
+  const l = document.getElementById('agent-list'), c = document.getElementById('ac');
+  const activeCount = Array.from(agents.values()).filter(a => a.live_status === 'thinking' || a.tasks_active > 0).length;
+  c.textContent = activeCount + '/' + agents.size;
+
+  if (!agents.size) {
+    l.innerHTML = '<div style="grid-column:1/-1;text-align:center;color:var(--m);padding:16px">🤖 No agents loaded</div>';
+    return;
+  }
+
+  // Group by type
+  const groups = { orchestrator: [], pipeline: [], specialist: [], factory: [], monitoring: [], hermes: [], unknown: [] };
+  agents.forEach(a => {
+    const g = a.type || 'unknown';
+    if (groups[g]) groups[g].push(a);
+    else groups.unknown.push(a);
+  });
+
+  const typeIcons = { orchestrator: '🎯', pipeline: '⚙️', specialist: '🔧', factory: '🏭', monitoring: '📊', hermes: '⚡', unknown: '❓' };
+  const typeNames = { orchestrator: 'Orchestrator', pipeline: 'Pipeline', specialist: 'Specialist', factory: 'Factory', monitoring: 'Monitoring', hermes: 'Hermes', unknown: 'Other' };
+
+  let html = '';
+  for (const [type, list] of Object.entries(groups)) {
+    if (!list.length) continue;
+    html += `<div style="grid-column:1/-1;font-size:10px;color:var(--m);text-transform:uppercase;letter-spacing:.5px;padding:8px 0 4px;border-bottom:1px solid var(--b)">${typeIcons[type]} ${typeNames[type]}</div>`;
+
+    list.sort((a, b) => b.tasks_active - a.tasks_active || b.tasks_total - a.tasks_total);
+    list.forEach(a => {
+      const isActive = a.live_status === 'thinking' || a.tasks_active > 0;
+      const statusColor = isActive ? 'var(--g)' : a.manifest_status === 'active' ? 'var(--y)' : 'var(--m)';
+      const statusDot = isActive ? '●' : a.manifest_status === 'active' ? '◐' : '○';
+      const caps = (a.capabilities || []).slice(0, 3).map(c => `<span style="background:var(--s2);padding:1px 5px;border-radius:4px;font-size:8px">${c}</span>`).join(' ');
+      const currentTask = a.current_task ? `<div style="font-size:9px;color:var(--blu);margin-top:3px">→ ${a.current_task}</div>` : '';
+      const stats = a.tasks_total > 0 ? `<div style="font-size:8px;color:var(--m);margin-top:3px;display:flex;gap:6px"><span>✅${a.tasks_done}</span><span>🔧${a.tasks_active}</span><span>📊${a.tasks_total}</span></div>` : '';
+
+      // Model selector
+      const modelOptions = allModels.map(m =>
+        `<option value="${m.id}" ${m.id === a.model ? 'selected' : ''}>${m.name} (${m.cost})</option>`
+      ).join('');
+      const modelSelect = `<select onchange="changeAgentModel('${a.name}', this.value)" style="background:var(--s2);border:1px solid var(--b);color:var(--blu);padding:2px 4px;border-radius:4px;font-size:8px;font-family:var(--mon);margin-top:3px;width:100%;cursor:pointer">${modelOptions}</select>`;
+
+      html += `<div class="ai" style="flex-direction:column;align-items:flex-start;gap:3px;padding:8px 10px;border-left:2px solid ${statusColor}">
+        <div style="display:flex;align-items:center;gap:5px;width:100%">
+          <span style="color:${statusColor};font-size:10px">${statusDot}</span>
+          <span style="font-family:var(--mon);font-size:11px;color:var(--t)">${a.name}</span>
+        </div>
+        <div style="font-size:9px;color:var(--m);line-height:1.3">${a.description ? a.description.slice(0, 60) : ''}</div>
+        <div style="display:flex;gap:3px;flex-wrap:wrap">${caps}</div>
+        ${modelSelect}
+        ${currentTask}
+        ${stats}
+      </div>`;
+    });
+  }
+  l.innerHTML = html;
+}
+
+// Fetch agents from API for richer data
+async function fetchAgents() {
+  try {
+    const res = await fetch('/api/agents');
+    const data = await res.json();
+    agents.clear();
+    data.forEach(a => agents.set(a.name, a));
+    updateAgents();
+  } catch(e) {}
+}
+
+// Change agent model
+async function changeAgentModel(agentName, modelId) {
+  try {
+    const res = await fetch(`/api/agents/${agentName}/model`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: modelId })
+    });
+    const data = await res.json();
+    if (data.ok) {
+      // Update local state
+      const agent = agents.get(agentName);
+      if (agent) {
+        agent.model = modelId;
+        updateAgents();
+      }
+    } else {
+      alert(data.error || 'Failed to update model');
+    }
+  } catch(e) {
+    alert('Error updating model: ' + e.message);
+  }
+}
+
+// Fetch models and agents on load
+fetchModels();
+fetchAgents();
+setInterval(fetchAgents, 5000);
+
+// Stats
+s.addEventListener('stats', e => {
+  const d = JSON.parse(e.data);
+  document.getElementById('si').textContent = d.inbox || 0;
+  document.getElementById('sa').textContent = d.active || 0;
+  document.getElementById('sd').textContent = d.done || 0;
+  document.getElementById('sf').textContent = d.failed || 0;
+  document.getElementById('sbn').textContent = (d.blocked || 0);
+  document.getElementById('ri').textContent = d.cycle || '—';
+});
+
+// Tasks
+s.addEventListener('tasks', e => {
+  allTasks = JSON.parse(e.data);
+  renderTasks(allTasks);
+  populateAgentFilter();
+});
+
+function renderTasks(tasks) {
+  const tbody = document.getElementById('tt');
+  if (!tasks.length) {
+    tbody.innerHTML = '<tr><td colspan="7" class="em"><div class="ic">📭</div><p>No tasks</p></td></tr>';
+    return;
+  }
+  tbody.innerHTML = tasks.map(t => {
+    const bdg = { inbox: 'in', active: 'ac', claimed: 'cl', done: 'dn', failed: 'fl', blocked: 'bl', feedback: 'fb' }[t.status] || 'in';
+    const actions = getActions(t);
+    return `<tr data-task="${t.full_id || t.id}" onclick="showTaskDetail('${t.full_id || t.id}')">
+      <td>${t.id}</td><td>${t.title}</td>
+      <td><span class="bdg ${bdg}">${t.status}</span></td>
+      <td>${t.from}</td><td>${t.assignee}</td><td>P${t.priority || 5}</td>
+      <td><div class="actions" onclick="event.stopPropagation()">${actions}</div></td></tr>`;
+  }).join('');
+}
+
+function getActions(t) {
+  let btns = '';
+  if (t.status === 'inbox') btns += `<button class="btn btn-primary btn-sm" onclick="claimTask('${t.full_id}')">Claim</button>`;
+  if (t.status === 'active' || t.status === 'claimed') {
+    btns += `<button class="btn btn-success btn-sm" onclick="doneTask('${t.full_id}')">Done</button>`;
+    btns += `<button class="btn btn-warning btn-sm" onclick="blockTask('${t.full_id}')">Block</button>`;
+    btns += `<button class="btn btn-danger btn-sm" onclick="failTask('${t.full_id}')">Fail</button>`;
+  }
+  if (t.status === 'blocked') btns += `<button class="btn btn-secondary btn-sm" onclick="unblockTask('${t.full_id}')">Unblock</button>`;
+  if (t.status === 'failed' && t.retry_count < (t.max_retries || 3)) {
+    btns += `<button class="btn btn-primary btn-sm" onclick="retryTask('${t.full_id}')">Retry</button>`;
+  }
+  btns += `<button class="btn btn-danger btn-sm" onclick="deleteTask('${t.full_id}')" style="opacity:0.6">✕</button>`;
+  return btns;
+}
+
+// Log
+s.addEventListener('log', e => {
+  const m = JSON.parse(e.data), log = document.getElementById('log');
+  const tc = { dispatch: 'di', worker_done: 'wd', escalate: 'es', broadcast: 'br', progress_update: 'tl' }[m.type] || '';
+  log.insertAdjacentHTML('afterbegin', `<div class="le"><span class="lt">${(m.time || '').slice(11, 19)}</span><span class="la">${m.actor}</span><span class="ly ${tc}">${m.type}</span><span class="lm">${m.msg}</span></div>`);
+  if (log.children.length > 80) log.lastChild.remove();
+});
+
+// === API CALLS ===
+async function api(method, url, body = null) {
+  const opts = { method, headers: { 'Content-Type': 'application/json' } };
+  if (body) opts.body = JSON.stringify(body);
+  const res = await fetch(url, opts);
+  return res.json();
+}
+
+async function createTask() {
+  const title = document.getElementById('new-title').value.trim();
+  if (!title) return alert('Enter task title');
+  const assignee = document.getElementById('new-assignee').value || null;
+  const priority = parseInt(document.getElementById('new-priority').value);
+  await api('POST', '/api/tasks', { title, assignee, priority, from: 'dashboard' });
+  document.getElementById('new-title').value = '';
+}
+
+async function claimTask(id) {
+  const agent = prompt('Agent name:', 'builder');
+  if (!agent) return;
+  const r = await api('POST', `/api/tasks/${id}/claim`, { agent });
+  if (r.error) alert(r.error);
+}
+
+async function doneTask(id) {
+  const resultStr = prompt('Result JSON (optional):', '{}');
+  const result = resultStr ? JSON.parse(resultStr) : { completed_via: 'dashboard' };
+  await api('POST', `/api/tasks/${id}/done`, { result });
+}
+
+async function blockTask(id) {
+  const reason = prompt('Block reason:', 'Waiting for decision');
+  if (!reason) return;
+  await api('POST', `/api/tasks/${id}/block`, { reason });
+}
+
+async function unblockTask(id) {
+  await api('POST', `/api/tasks/${id}/unblock`, {});
+}
+
+async function failTask(id) {
+  const error = prompt('Error message:', 'Manual fail from dashboard');
+  if (!error) return;
+  await api('POST', `/api/tasks/${id}/fail`, { error });
+}
+
+async function retryTask(id) {
+  await api('POST', `/api/tasks/${id}/claim`, { agent: 'retry' });
+}
+
+async function deleteTask(id) {
+  if (!confirm('Delete this task?')) return;
+  await api('DELETE', `/api/tasks/${id}`);
+}
+
+// === TASK DETAIL MODAL ===
+async function showTaskDetail(id) {
+  const data = await api('GET', `/api/tasks/${id}`);
+  if (data.error) return alert(data.error);
+  document.getElementById('modal-title').textContent = '📋 ' + data.title;
+  document.getElementById('md-id').textContent = data.id;
+  document.getElementById('md-title').textContent = data.title;
+  document.getElementById('md-status').innerHTML = `<span class="bdg ${data.status.slice(0,2)}">${data.status}</span> (folder: ${data.folder})`;
+  document.getElementById('md-assignee').textContent = data.assignee || '—';
+  document.getElementById('md-priority').textContent = 'P' + data.priority;
+  document.getElementById('md-from').textContent = data.from_agent;
+  document.getElementById('md-retries').textContent = `${data.retry_count} / ${data.max_retries}`;
+  document.getElementById('md-created').textContent = data.created_at || '—';
+  document.getElementById('md-context').textContent = JSON.stringify(data.context, null, 2) || '{}';
+  document.getElementById('md-result').textContent = JSON.stringify(data.result, null, 2) || '{}';
+
+  // Dynamic actions
+  const acts = document.getElementById('md-actions');
+  acts.innerHTML = getActions(data).replace(/onclick="([^"]*)"/g, 'onclick="$1;closeModal()"');
+  acts.innerHTML += '<button class="btn btn-secondary" onclick="closeModal()">Close</button>';
+
+  document.getElementById('modal').classList.add('active');
+}
+
+function closeModal() { document.getElementById('modal').classList.remove('active'); }
+
+// === FILTERS ===
+function applyFilters() {
+  const status = document.getElementById('f-status').value;
+  const agent = document.getElementById('f-agent').value;
+  const search = document.getElementById('f-search').value.toLowerCase();
+  let filtered = allTasks;
+  if (status) filtered = filtered.filter(t => t.status === status);
+  if (agent) filtered = filtered.filter(t => t.assignee === agent || t.from === agent);
+  if (search) filtered = filtered.filter(t => t.title.toLowerCase().includes(search));
+  renderTasks(filtered);
+}
+
+function resetFilters() {
+  document.getElementById('f-status').value = '';
+  document.getElementById('f-agent').value = '';
+  document.getElementById('f-search').value = '';
+  renderTasks(allTasks);
+}
+
+function populateAgentFilter() {
+  const sel = document.getElementById('f-agent');
+  const assigneeSel = document.getElementById('new-assignee');
+  const agentSet = new Set();
+  allTasks.forEach(t => { if (t.assignee && t.assignee !== '-') agentSet.add(t.assignee); if (t.from) agentSet.add(t.from); });
+  const agents = [...agentSet].sort();
+  sel.innerHTML = '<option value="">All agents</option>' + agents.map(a => `<option value="${a}">${a}</option>`).join('');
+  assigneeSel.innerHTML = '<option value="">Unassigned</option>' + agents.map(a => `<option value="${a}">${a}</option>`).join('');
+}
+
+// Keyboard shortcuts
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
+</script>
+</body>
+</html>
