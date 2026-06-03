@@ -8,6 +8,7 @@ Also tests the Mail Bus: send/ask/reply/broadcast/archive.
 """
 
 import sys, os, json, tempfile, shutil, time, asyncio
+import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "python"))
 from overdrop import MailBus, FsProtocol, MessageType, TaskStatus
@@ -24,6 +25,7 @@ def check(name: str, condition: bool, detail: str = ""):
         FAIL += 1
         print(f"  ❌ {name} — {detail}")
 
+@pytest.mark.asyncio
 async def test_integration():
     global PASS, FAIL
     print("=" * 60)

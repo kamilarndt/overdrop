@@ -1,5 +1,6 @@
 """OverDrop — Worktree & Merge Queue Tests"""
 import sys, os, tempfile, shutil, asyncio, uuid, subprocess as sp
+import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "python"))
 from overdrop import WorktreeManager, MergeQueue
@@ -21,6 +22,7 @@ def setup_git(path):
     sp.run(["git", "commit", "-m", "init"], cwd=path, capture_output=True)
     return path
 
+@pytest.mark.asyncio
 async def test_worktree():
     tmp = tempfile.mkdtemp(prefix="od-wt-")
     repo = setup_git(os.path.join(tmp, "repo"))
@@ -45,6 +47,7 @@ async def test_worktree():
     shutil.rmtree(tmp)
     return True
 
+@pytest.mark.asyncio
 async def test_merge():
     tmp = tempfile.mkdtemp(prefix="od-mq-")
     repo = setup_git(os.path.join(tmp, "repo"))
